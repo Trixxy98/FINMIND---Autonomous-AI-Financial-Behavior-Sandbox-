@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-finmind}
+      POSTGRES_USER: ${POSTGRES_USER:-finmind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-only}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - finmind-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finmind} -d ${POSTGRES_DB:-finmind}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  finmind-postgres:
