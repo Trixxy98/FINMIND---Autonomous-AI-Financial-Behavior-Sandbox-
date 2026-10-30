@@ -344,6 +344,16 @@ Base URL: `/api/v1`. Every call has user/session authorization. All identifiers 
 
 **UX principle:** use distinct visual labels for **PROPOSED**, **DENIED**, **COMMITTED**, **REPORTED BY AGENT**, and **VERIFIED BY LEDGER**. A wallet number shown in agent text is not authoritative.
 
+### 13.1 Pixel-art observatory presentation
+The web observatory may use a small pixel-art simulation as an approachable visual layer for explaining run activity. For example, an agent avatar can interact with a virtual wallet, synthetic bills, and savings. Animations and speech bubbles must be driven by recorded run events, not by unverified model narration.
+
+The pixel-art layer is presentation only: it must not make financial decisions, alter policy, or serve as the authoritative ledger view. Clearly distinguish proposed, denied, and committed actions, and label agent-reported claims separately from ledger-verified balances. Keep the event timeline, action details, and ledger inspector available for precise inspection. Avoid implying that a model is inherently good or bad, or turning financial outcomes into an unqualified game score.
+
+### 13.2 Model/provider selection
+Researchers may select from configured model providers and model IDs (for example, Claude via Anthropic, GPT via OpenAI, Gemini via Google, or a locally served model through Ollama). FINMIND supplies the runtime, prompts, scenario, and allowlisted tools; providers supply the model used for decisions. Each provider integration requires a compatible adapter and explicit configuration; the UI must list only configured and available options. Keep credentials server-side and never let a model/provider define its own permissions.
+
+For comparisons, hold the scenario, objective, starting state, policy, tool schemas, budgets, and seed constant where applicable, varying the model/provider as the declared experimental factor. Record provider, exact model ID/snapshot when available, sampling parameters, prompt and tool versions, seed, and cost/latency metadata. Support a deterministic mock agent for repeatable development and CI without provider calls. Report multiple runs and provider nondeterminism; do not claim that every AI agent is supported or that one run establishes a general model trait.
+
 ## 14. Security and Isolation
 ### 14.1 Threat model
 Relevant threats include prompt injection from scenario messages, unauthorized tool calls, exfiltration via untrusted destinations, cross-run access, fabricated tool responses, ledger modification, replay tampering, token exhaustion, double payment through retries, and model-generated false claims.

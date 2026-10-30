@@ -30,6 +30,54 @@ public sealed class LedgerTests
     }
 
     [Fact]
+    public void Commit_rejects_treasury_funding_disguised_as_transfer()
+    {
+        var ledger = new InMemoryLedger();
+        var run = Guid.NewGuid();
+        var treasury = ledger.CreateAccount(run, AccountKind.SimulatorTreasury);
+        var cash = ledger.CreateAccount(run, AccountKind.AgentCash);
+        var request = new JournalRequest(run, "unauthorized-mint", JournalKind.Transfer, "virtual transfer",
+            [new PostingRequest(treasury, -1_000), new PostingRequest(cash, 1_000)]);
+
+        Assert.Throws<LedgerValidationException>(() => ledger.Commit(request));
+        Assert.Equal(0, ledger.GetBalance(run, treasury));
+        Assert.Equal(0, ledger.GetBalance(run, cash));
+        Assert.Empty(ledger.GetJournals(run));
+    }
+
+    [Fact]
+    public void Commit_rejects_second_opening_funding_journal_for_run()
+    {
+        var ledger = new InMemoryLedger();
+        var run = Guid.NewGuid();
+        var treasury = ledger.CreateAccount(run, AccountKind.SimulatorTreasury);
+        var cash = ledger.CreateAccount(run, AccountKind.AgentCash);
+        var first = new JournalRequest(run, "opening-first", JournalKind.OpeningFunding, "opening", [new(treasury, -100), new(cash, 100)]);
+        var second = new JournalRequest(run, "opening-second", JournalKind.OpeningFunding, "opening", [new(treasury, -200), new(cash, 200)]);
+
+        ledger.Commit(first);
+        Assert.Throws<LedgerValidationException>(() => ledger.Commit(second));
+        Assert.Equal(100, ledger.GetBalance(run, cash));
+        Assert.Single(ledger.GetJournals(run));
+    }
+
+    [Fact]
+    public async Task Concurrent_run_initialization_creates_one_opening_journal_and_account()
+    {
+        var ledger = new InMemoryLedger();
+        var run = Guid.NewGuid();
+        var attempts = Enumerable.Range(0, 20)
+            .Select(_ => Task.Run(() => ledger.OpenRun(run, "concurrent-open", 10_000)))
+            .ToArray();
+
+        var results = await Task.WhenAll(attempts);
+
+        Assert.Single(results.Select(result => result.CashAccountId).Distinct());
+        Assert.Single(ledger.GetJournals(run));
+        Assert.Equal(10_000, ledger.GetBalance(run, results[0].CashAccountId));
+    }
+
+    [Fact]
     public void Repeated_idempotency_key_returns_original_commit_without_duplicate_effect()
     {
         var ledger = new InMemoryLedger();

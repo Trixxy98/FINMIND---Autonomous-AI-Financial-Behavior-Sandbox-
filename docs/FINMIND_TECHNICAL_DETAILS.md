@@ -24,7 +24,9 @@ Untrusted content is data, never executable instruction. It cannot alter roles, 
 - Each committed journal has at least two postings, all in one run and currency, whose signed sum is exactly zero.
 - Journal creation and postings commit atomically. An incomplete journal is not visible as committed.
 - Opening funds are a journal from simulator treasury to the run's agent cash account.
+- A run accepts only one opening-funding journal; retries with the original idempotency key return the original journal, while a new funding key cannot create a second opening allocation.
 - Transfers and savings moves must identify both permitted accounts and preserve total value, except explicit authorized synthetic source/sink events.
+- Journal kind constrains its posting account kinds; a generic transfer must never debit simulator treasury or otherwise act as an opening-funding/mint path. Validate this in the trusted finance boundary, not only in tool/API handlers.
 - A bill payment must bind to a server-known outstanding obligation, amount, payee, run, and idempotency key. Client/model-supplied labels do not resolve destinations.
 - Derived balances are rebuildable projections. Reconciliation compares them with the sum of immutable postings.
 - Reversal is a new linked journal; committed history is never edited or deleted.

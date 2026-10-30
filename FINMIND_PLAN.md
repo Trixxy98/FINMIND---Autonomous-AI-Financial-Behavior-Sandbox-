@@ -43,9 +43,9 @@ Exit gate: end-to-end mock run emits an inspectable causal trace; run isolation,
 
 ### Phase 3 — Observatory UI
 
-Build experiment setup, run control, live event stream, verified wallet view, action detail, policy verdicts, and ledger inspector. The browser is a read/control surface, never the authority for financial rules.
+Add experiment setup, run control, live event stream, verified wallet view, action detail, policy verdicts, and ledger inspector. Use an optional pixel-art simulation layer to make run behavior approachable: visualize agent activity from recorded events while retaining precise timelines and ledger details. The browser is a read/control surface, never the authority for financial rules.
 
-Exit gate: researcher can create, start, observe, cancel, and inspect a run without direct DB access; labels distinguish proposed/denied/committed/reported/verified.
+Exit gate: researcher can create, start, observe, cancel, and inspect a run without direct DB access; labels distinguish proposed/denied/committed/reported/verified, and the pixel-art view cannot misrepresent ledger state or hide the underlying evidence.
 
 ### Phase 4 — Research workflows
 
@@ -65,9 +65,10 @@ Exit gate: independent developer can reproduce mock results locally; no real fin
 - Persistence: migrations, scoped foreign keys, unique `(run_id, idempotency_key)`, append-only roles, concurrency control.
 - Contracts: OpenAPI, strict tool schemas, event taxonomy, versioned export format.
 - Runtime: provider-neutral model interface, finite-state loop, deterministic mock, redaction, budgets.
+- Provider selection: list only configured provider/model adapters (e.g. Anthropic/Claude, OpenAI/GPT, Google/Gemini, Ollama/local); record exact model and experiment metadata. No claim of universal agent compatibility.
 - Simulator: seeded fixtures, virtual time, synthetic obligations and events.
 - API: authentication/RBAC, run orchestration, read models, cancellation, SSE and export.
-- Web: wizard, observatory, run detail, ledger reconciliation, analytics and comparison.
+- Web: wizard with configured model/provider selection, pixel-art observatory driven by run events, run detail, ledger reconciliation, analytics and comparison. Keep authoritative balances and evidence inspectable outside the game-like presentation.
 - Quality: unit/property/integration/E2E tests, threat fixtures, reproducibility checks, operational docs.
 
 ## 5. Recommended initial implementation order

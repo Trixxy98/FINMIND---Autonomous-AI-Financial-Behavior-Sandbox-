@@ -61,6 +61,8 @@ public sealed class InMemoryLedger
                 if (Fingerprint(existing) != fingerprint) throw new IdempotencyConflictException("Idempotency key was previously used with a different payload.");
                 return new CommitResult(existing.JournalId, true, true);
             }
+            if (request.Kind == JournalKind.OpeningFunding && _journals.Any(j => j.RunId == request.RunId && j.Kind == JournalKind.OpeningFunding))
+                throw new LedgerValidationException("Run already has an opening funding journal.");
             var deltas = request.Postings.GroupBy(p => p.AccountId).ToDictionary(g => g.Key, g => g.Sum(p => p.AmountSen));
             foreach (var (accountId, delta) in deltas)
             {
@@ -178,6 +180,29 @@ public sealed class InMemoryLedger
             total = checked(total + posting.AmountSen);
         }
         if (total != 0) throw new LedgerValidationException("Journal postings must balance to zero.");
+        ValidateJournalShape(request);
+    }
+
+    private void ValidateJournalShape(JournalRequest request)
+    {
+        if (request.Postings.Count != 2 || request.Postings[0].AccountId == request.Postings[1].AccountId)
+            throw new LedgerValidationException("This journal kind requires exactly two distinct accounts.");
+
+        var debit = request.Postings.Single(posting => posting.AmountSen < 0);
+        var credit = request.Postings.Single(posting => posting.AmountSen > 0);
+        var debitKind = _accounts[debit.AccountId].Kind;
+        var creditKind = _accounts[credit.AccountId].Kind;
+        var valid = request.Kind switch
+        {
+            JournalKind.OpeningFunding => debitKind == AccountKind.SimulatorTreasury && creditKind == AccountKind.AgentCash,
+            JournalKind.Transfer => debitKind is AccountKind.AgentCash or AccountKind.AgentSavings && creditKind is AccountKind.Merchant or AccountKind.AgentCash or AccountKind.AgentSavings,
+            JournalKind.SavingsMove => debitKind == AccountKind.AgentCash && creditKind == AccountKind.AgentSavings,
+            JournalKind.BillPayment => debitKind == AccountKind.AgentCash && creditKind == AccountKind.Merchant,
+            JournalKind.Reversal => false,
+            _ => false
+        };
+
+        if (!valid) throw new LedgerValidationException("Posting account kinds are not permitted for this journal kind.");
     }
     private static void ValidateAmount(long amountSen, long transactionLimitSen)
     {
