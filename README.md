@@ -4,7 +4,7 @@ A local-first research sandbox for observing AI behavior with virtual funds only
 
 ## Current status
 
-Phase 0 scaffold is in place. Phase 1 has an in-memory C# ledger prototype and local internal API endpoints for virtual opening funding, balance reads, transfers, savings moves, synthetic obligations, and payments against server-stored obligation amounts. This is development-only: state is lost on API restart, endpoints have no authentication, and there is no PostgreSQL persistence, server-side run lifecycle/policy, or durable audit event stream. Do not expose the internal endpoints outside localhost. No model-provider integration or agent tool gateway exists yet.
+Phase 0 scaffold is in place. Phase 1 now has a PostgreSQL-backed C# ledger for the local API plus an in-memory ledger prototype for deterministic unit tests. Local internal API endpoints remain unauthenticated, and server-side run lifecycle/policy and durable audit event stream are not implemented. Do not expose the internal endpoints outside localhost. No model-provider integration or agent tool gateway exists yet.
 
 ## Prerequisites
 
@@ -17,9 +17,10 @@ Phase 0 scaffold is in place. Phase 1 has an in-memory C# ledger prototype and l
 
 1. Copy `.env.example` to `.env` and replace the local development password.
 2. Start PostgreSQL: `docker compose -f infra/compose.yaml up -d`.
-3. Start the API: `dotnet run --project apps/api/Finmind.Api.csproj` (listens on `http://localhost:5080`).
-4. Start the runtime health endpoint: `python3 services/agent-runtime/health_server.py` (listens on `http://localhost:8090`).
-5. Start the web app: `cd apps/web && npm install && npm run dev` (listens on Vite's printed local URL).
+3. Apply the initial ledger schema: `docker compose -f infra/compose.yaml exec -T postgres psql -v ON_ERROR_STOP=1 -U finmind -d finmind < infra/db/migrations/001_ledger.sql`.
+4. Start the API with the local connection string from `.env`: `set -a && source .env && set +a && dotnet run --project apps/api/Finmind.Api.csproj` (listens on `http://localhost:5080`).
+5. Start the runtime health endpoint: `python3 services/agent-runtime/health_server.py` (listens on `http://localhost:8090`).
+6. Start the web app: `cd apps/web && npm install && npm run dev` (listens on Vite's printed local URL).
 
 Health checks: `GET http://localhost:5080/health` and `GET http://localhost:8090/health`.
 
@@ -27,6 +28,7 @@ Health checks: `GET http://localhost:5080/health` and `GET http://localhost:8090
 
 - API: `dotnet build apps/api/Finmind.Api.csproj`
 - Finance ledger tests: `dotnet test apps/api/Finance.Tests/Finmind.Finance.Tests.csproj`
+- PostgreSQL integration tests (use a separate database so tests do not add fixtures to the app database): create `finmind_test` with `docker compose -f infra/compose.yaml exec -T postgres createdb -U finmind finmind_test`, apply `001_ledger.sql` to it using the migration command above with `-d finmind_test`, then run `set -a && source .env && set +a && dotnet test apps/api/Finance.Tests/Finmind.Finance.Tests.csproj`.
 - Runtime: `python3 -m unittest discover -s services/agent-runtime/tests -v`
 - Web: `cd apps/web && npm test && npm run build`
 - Compose configuration (requires running Docker daemon): `docker compose -f infra/compose.yaml config`

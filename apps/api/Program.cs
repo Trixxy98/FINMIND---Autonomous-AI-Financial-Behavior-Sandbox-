@@ -1,29 +1,42 @@
+using Npgsql;
+
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddSingleton<Finmind.Api.Finance.InMemoryLedger>();
+var connectionString = builder.Configuration.GetConnectionString("Finmind")
+    ?? throw new InvalidOperationException("Configure ConnectionStrings:Finmind before starting the API.");
+builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
+builder.Services.AddSingleton<Finmind.Api.Finance.PostgresLedger>();
 var app = builder.Build();
 
-app.MapGet("/health", () => Results.Ok(new
+app.MapGet("/health", (NpgsqlDataSource dataSource) =>
 {
-    status = "ok",
-    service = "finmind-api",
-    phase = 0
-}));
+    try
+    {
+        using var connection = dataSource.OpenConnection();
+        using var command = new NpgsqlCommand("SELECT 1", connection);
+        command.ExecuteScalar();
+        return Results.Ok(new { status = "ok", service = "finmind-api", phase = 1, database = "ok" });
+    }
+    catch (NpgsqlException)
+    {
+        return Results.Json(new { status = "unavailable", service = "finmind-api", database = "unavailable" }, statusCode: 503);
+    }
+});
 
-app.MapPost("/internal/runs/{runId:guid}/accounts", (Guid runId, CreateAccountRequest request, Finmind.Api.Finance.InMemoryLedger ledger) =>
+app.MapPost("/internal/runs/{runId:guid}/accounts", (Guid runId, CreateAccountRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
 {
-    if (!Enum.TryParse<Finmind.Api.Finance.AccountKind>(request.Kind, true, out var kind))
+    if (runId == Guid.Empty || !Enum.TryParse<Finmind.Api.Finance.AccountKind>(request.Kind, true, out var kind) || !Enum.IsDefined(kind))
         return Results.BadRequest(new { error = "Unsupported account kind." });
     var accountId = ledger.CreateAccount(runId, kind);
     return Results.Created($"/internal/runs/{runId}/accounts/{accountId}", new { accountId, runId, kind = kind.ToString(), currency = "MYR" });
 });
 
-app.MapGet("/internal/runs/{runId:guid}/accounts/{accountId:guid}/balance", (Guid runId, Guid accountId, Finmind.Api.Finance.InMemoryLedger ledger) =>
+app.MapGet("/internal/runs/{runId:guid}/accounts/{accountId:guid}/balance", (Guid runId, Guid accountId, Finmind.Api.Finance.PostgresLedger ledger) =>
 {
     try { return Results.Ok(new { runId, accountId, currency = "MYR", balanceSen = ledger.GetBalance(runId, accountId), source = "ledger" }); }
     catch (Finmind.Api.Finance.LedgerValidationException) { return Results.NotFound(); }
 });
 
-app.MapPost("/internal/runs/{runId:guid}/funding", (Guid runId, FundingRequest request, Finmind.Api.Finance.InMemoryLedger ledger) =>
+app.MapPost("/internal/runs/{runId:guid}/funding", (Guid runId, FundingRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
 {
     if (request.AmountSen <= 0) return Results.BadRequest(new { error = "Amount must be positive sen." });
     try
@@ -36,7 +49,7 @@ app.MapPost("/internal/runs/{runId:guid}/funding", (Guid runId, FundingRequest r
     catch (OverflowException) { return Results.BadRequest(new { error = "Amount exceeds supported range." }); }
 });
 
-app.MapPost("/internal/runs/{runId:guid}/transfers", (Guid runId, TransferRequest request, Finmind.Api.Finance.InMemoryLedger ledger) =>
+app.MapPost("/internal/runs/{runId:guid}/transfers", (Guid runId, TransferRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
 {
     try
     {
@@ -48,7 +61,7 @@ app.MapPost("/internal/runs/{runId:guid}/transfers", (Guid runId, TransferReques
     catch (OverflowException) { return Results.BadRequest(new { error = "Amount exceeds supported range." }); }
 });
 
-app.MapPost("/internal/runs/{runId:guid}/savings", (Guid runId, SavingsRequest request, Finmind.Api.Finance.InMemoryLedger ledger) =>
+app.MapPost("/internal/runs/{runId:guid}/savings", (Guid runId, SavingsRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
 {
     try
     {
@@ -60,7 +73,7 @@ app.MapPost("/internal/runs/{runId:guid}/savings", (Guid runId, SavingsRequest r
     catch (OverflowException) { return Results.BadRequest(new { error = "Amount exceeds supported range." }); }
 });
 
-app.MapPost("/internal/runs/{runId:guid}/bill-payments", (Guid runId, BillPaymentRequest request, Finmind.Api.Finance.InMemoryLedger ledger) =>
+app.MapPost("/internal/runs/{runId:guid}/bill-payments", (Guid runId, BillPaymentRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
 {
     try
     {
@@ -72,13 +85,13 @@ app.MapPost("/internal/runs/{runId:guid}/bill-payments", (Guid runId, BillPaymen
     catch (OverflowException) { return Results.BadRequest(new { error = "Amount exceeds supported range." }); }
 });
 
-app.MapPost("/internal/runs/{runId:guid}/obligations", (Guid runId, CreateObligationRequest request, Finmind.Api.Finance.InMemoryLedger ledger) =>
+app.MapPost("/internal/runs/{runId:guid}/obligations", (Guid runId, CreateObligationRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
 {
     try { return Results.Created($"/internal/runs/{runId}/obligations", ledger.CreateObligation(runId, request.MerchantAccountId, request.AmountSen)); }
     catch (Finmind.Api.Finance.LedgerValidationException ex) { return Results.BadRequest(new { error = ex.Message }); }
 });
 
-app.MapGet("/internal/runs/{runId:guid}/obligations/{obligationId:guid}", (Guid runId, Guid obligationId, Finmind.Api.Finance.InMemoryLedger ledger) =>
+app.MapGet("/internal/runs/{runId:guid}/obligations/{obligationId:guid}", (Guid runId, Guid obligationId, Finmind.Api.Finance.PostgresLedger ledger) =>
 {
     try { return Results.Ok(ledger.GetObligation(runId, obligationId)); }
     catch (Finmind.Api.Finance.LedgerValidationException) { return Results.NotFound(); }

@@ -32,6 +32,9 @@ Untrusted content is data, never executable instruction. It cannot alter roles, 
 - Reversal is a new linked journal; committed history is never edited or deleted.
 - Enforce no overdraft unless a versioned experiment policy explicitly enables it.
 
+### Initial PostgreSQL migration status
+`infra/db/migrations/001_ledger.sql` creates the initial run/account/journal/posting/obligation schema. Composite foreign keys keep postings within one run and currency; deferred constraint triggers require exactly two distinct, balanced postings with account kinds allowed by journal kind; unique constraints enforce run-scoped idempotency and one opening-funding journal per run; journal entries and postings are append-only. The local API now uses `PostgresLedger`; `InMemoryLedger` remains for deterministic unit tests. PostgreSQL-backed transactions serialize mutations per run and validate available funds in the application. Database-role separation, caller authorization, run lifecycle/policy, and durable audit events remain unimplemented, so the internal API must remain localhost-only.
+
 ### Commit procedure
 1. Authenticate trusted caller and resolve scoped run principal server-side.
 2. Validate schema, run state, tool grant, ownership, currency, amount, destination, limits, and idempotency.
