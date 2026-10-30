@@ -36,8 +36,8 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         var configuredLimit = GetRunTransactionLimit(connection, transaction, runId);
         if (configuredLimit is null)
         {
-            if (HasOpeningFunding(connection, transaction, runId))
-                throw new LedgerValidationException("Existing run has opening funds but no transaction policy; create a new run.");
+            if (HasAnyJournal(connection, transaction, runId))
+                throw new LedgerValidationException("Existing run has ledger activity but no transaction policy; create a new run.");
             SetRunTransactionLimit(connection, transaction, runId, transactionLimitSen);
             configuredLimit = transactionLimitSen;
         }
@@ -59,6 +59,9 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
             transaction.Commit();
             return new OpenRunResult(existingOpening.Value.JournalId, true, true, existingOpening.Value.CashAccountId);
         }
+
+        if (HasAnyJournal(connection, transaction, runId))
+            throw new LedgerValidationException("Run already has ledger activity and cannot receive new opening funds.");
 
         var journalId = Guid.NewGuid();
         var treasuryId = Guid.NewGuid();
@@ -379,6 +382,14 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         using var command = new NpgsqlCommand(
             "SELECT EXISTS (SELECT 1 FROM journal_entries WHERE run_id = @run_id AND kind = 'opening_funding')",
             connection, transaction);
+        command.Parameters.AddWithValue("run_id", runId);
+        return (bool)command.ExecuteScalar()!;
+    }
+
+    private static bool HasAnyJournal(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT EXISTS (SELECT 1 FROM journal_entries WHERE run_id = @run_id)", connection, transaction);
         command.Parameters.AddWithValue("run_id", runId);
         return (bool)command.ExecuteScalar()!;
     }

@@ -83,6 +83,46 @@ public sealed class PostgresLedgerTests
     }
 
     [PostgresFact]
+    public void Savings_and_bill_actions_enforce_caps_and_keep_denials_side_effect_free()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("FINMIND_TEST_DATABASE")!;
+        using var dataSource = NpgsqlDataSource.Create(connectionString);
+        var runId = Guid.NewGuid();
+        var ledger = new PostgresLedger(dataSource);
+        var cashId = ledger.OpenRun(runId, "open", 1_000, 100).CashAccountId;
+        var savingsId = ledger.CreateAccount(runId, AccountKind.AgentSavings);
+        var merchantId = ledger.CreateAccount(runId, AccountKind.Merchant);
+
+        Assert.Throws<LedgerValidationException>(() => ledger.MoveToSavings(runId, "savings-over-cap", cashId, savingsId, 101));
+        Assert.Equal(1_000, ledger.GetBalance(runId, cashId));
+        Assert.Equal(0, ledger.GetBalance(runId, savingsId));
+
+        var savingsMove = ledger.MoveToSavings(runId, "savings-at-cap", cashId, savingsId, 100);
+        var savingsRetry = ledger.MoveToSavings(runId, "savings-at-cap", cashId, savingsId, 100);
+        Assert.Equal(savingsMove.JournalId, savingsRetry.JournalId);
+        Assert.True(savingsRetry.WasIdempotentReplay);
+
+        var overCapBill = ledger.CreateObligation(runId, merchantId, 101);
+        Assert.Throws<LedgerValidationException>(() => ledger.PayObligation(runId, "bill-over-cap", cashId, overCapBill.ObligationId));
+        Assert.False(ledger.GetObligation(runId, overCapBill.ObligationId).Paid);
+        Assert.Equal(900, ledger.GetBalance(runId, cashId));
+        Assert.Equal(100, ledger.GetBalance(runId, savingsId));
+        Assert.Equal(0, ledger.GetBalance(runId, merchantId));
+        Assert.Equal(2, ledger.GetJournals(runId).Count);
+
+        var bill = ledger.CreateObligation(runId, merchantId, 100);
+        var payment = ledger.PayObligation(runId, "bill-at-cap", cashId, bill.ObligationId);
+        var paymentRetry = ledger.PayObligation(runId, "bill-at-cap", cashId, bill.ObligationId);
+        Assert.Equal(payment.JournalId, paymentRetry.JournalId);
+        Assert.True(paymentRetry.WasIdempotentReplay);
+        Assert.True(ledger.GetObligation(runId, bill.ObligationId).Paid);
+        Assert.Equal(800, ledger.GetBalance(runId, cashId));
+        Assert.Equal(100, ledger.GetBalance(runId, savingsId));
+        Assert.Equal(100, ledger.GetBalance(runId, merchantId));
+        Assert.Equal(3, ledger.GetJournals(runId).Count);
+    }
+
+    [PostgresFact]
     public async Task Concurrent_opening_funding_is_single_and_cross_run_spending_is_denied()
     {
         var connectionString = Environment.GetEnvironmentVariable("FINMIND_TEST_DATABASE")!;
@@ -126,6 +166,57 @@ public sealed class PostgresLedgerTests
         update.Parameters.AddWithValue("run_id", runId);
         var exception = Assert.Throws<PostgresException>(() => update.ExecuteNonQuery());
         Assert.Equal("55000", exception.SqlState);
+    }
+
+    [PostgresFact]
+    public void Legacy_run_with_ledger_activity_cannot_be_reopened_with_a_new_policy()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("FINMIND_TEST_DATABASE")!;
+        using var dataSource = NpgsqlDataSource.Create(connectionString);
+        var runId = Guid.NewGuid();
+        var cashId = Guid.NewGuid();
+        var merchantId = Guid.NewGuid();
+        var journalId = Guid.NewGuid();
+
+        using (var connection = dataSource.OpenConnection())
+        using (var transaction = connection.BeginTransaction())
+        {
+            using var run = new NpgsqlCommand("INSERT INTO experiment_runs (id) VALUES (@run_id)", connection, transaction);
+            run.Parameters.AddWithValue("run_id", runId);
+            run.ExecuteNonQuery();
+
+            using var accounts = new NpgsqlCommand(
+                "INSERT INTO accounts (id, run_id, kind) VALUES (@cash_id, @run_id, 'agent_cash'), (@merchant_id, @run_id, 'agent_savings')",
+                connection, transaction);
+            accounts.Parameters.AddWithValue("cash_id", cashId);
+            accounts.Parameters.AddWithValue("run_id", runId);
+            accounts.Parameters.AddWithValue("merchant_id", merchantId);
+            accounts.ExecuteNonQuery();
+
+            using var journal = new NpgsqlCommand(
+                "INSERT INTO journal_entries (id, run_id, kind, idempotency_key, description) " +
+                "VALUES (@journal_id, @run_id, 'transfer', 'legacy-transfer', 'legacy activity')",
+                connection, transaction);
+            journal.Parameters.AddWithValue("journal_id", journalId);
+            journal.Parameters.AddWithValue("run_id", runId);
+            journal.ExecuteNonQuery();
+
+            using var postings = new NpgsqlCommand(
+                "INSERT INTO journal_postings (entry_id, run_id, account_id, currency, signed_amount_sen) " +
+                "VALUES (@journal_id, @run_id, @cash_id, 'MYR', 10), (@journal_id, @run_id, @merchant_id, 'MYR', -10)",
+                connection, transaction);
+            postings.Parameters.AddWithValue("journal_id", journalId);
+            postings.Parameters.AddWithValue("run_id", runId);
+            postings.Parameters.AddWithValue("cash_id", cashId);
+            postings.Parameters.AddWithValue("merchant_id", merchantId);
+            postings.ExecuteNonQuery();
+            transaction.Commit();
+        }
+
+        var ledger = new PostgresLedger(dataSource);
+        Assert.Throws<LedgerValidationException>(() => ledger.OpenRun(runId, "new-opening", 500, 100));
+        Assert.Single(ledger.GetJournals(runId));
+        Assert.Equal(10, ledger.GetBalance(runId, cashId));
     }
 }
 
