@@ -26,8 +26,15 @@ app.MapPost("/internal/runs/{runId:guid}/accounts", (Guid runId, CreateAccountRe
 {
     if (runId == Guid.Empty || !Enum.TryParse<Finmind.Api.Finance.AccountKind>(request.Kind, true, out var kind) || !Enum.IsDefined(kind))
         return Results.BadRequest(new { error = "Unsupported account kind." });
-    var accountId = ledger.CreateAccount(runId, kind);
-    return Results.Created($"/internal/runs/{runId}/accounts/{accountId}", new { accountId, runId, kind = kind.ToString(), currency = "MYR" });
+    try
+    {
+        var accountId = ledger.CreateAccount(runId, kind);
+        return Results.Created($"/internal/runs/{runId}/accounts/{accountId}", new { accountId, runId, kind = kind.ToString(), currency = "MYR" });
+    }
+    catch (Finmind.Api.Finance.LedgerValidationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapGet("/internal/runs/{runId:guid}/accounts/{accountId:guid}/balance", (Guid runId, Guid accountId, Finmind.Api.Finance.PostgresLedger ledger) =>
@@ -41,7 +48,7 @@ app.MapPost("/internal/runs/{runId:guid}/funding", (Guid runId, FundingRequest r
     if (request.AmountSen <= 0) return Results.BadRequest(new { error = "Amount must be positive sen." });
     try
     {
-        var result = ledger.OpenRun(runId, request.IdempotencyKey, request.AmountSen);
+        var result = ledger.OpenRun(runId, request.IdempotencyKey, request.AmountSen, request.TransactionLimitSen);
         return Results.Ok(new { result.JournalId, result.Committed, result.WasIdempotentReplay, cashAccountId = result.CashAccountId, balanceSen = ledger.GetBalance(runId, result.CashAccountId), currency = "MYR" });
     }
     catch (Finmind.Api.Finance.IdempotencyConflictException) { return Results.Conflict(new { error = "Idempotency key reused with a different payload." }); }
@@ -53,7 +60,7 @@ app.MapPost("/internal/runs/{runId:guid}/transfers", (Guid runId, TransferReques
 {
     try
     {
-        var result = ledger.Transfer(runId, request.IdempotencyKey, request.SourceAccountId, request.DestinationAccountId, request.AmountSen, request.TransactionLimitSen);
+        var result = ledger.Transfer(runId, request.IdempotencyKey, request.SourceAccountId, request.DestinationAccountId, request.AmountSen);
         return Results.Ok(new { result.JournalId, result.Committed, result.WasIdempotentReplay });
     }
     catch (Finmind.Api.Finance.IdempotencyConflictException) { return Results.Conflict(new { error = "Idempotency key reused with a different payload." }); }
@@ -65,7 +72,7 @@ app.MapPost("/internal/runs/{runId:guid}/savings", (Guid runId, SavingsRequest r
 {
     try
     {
-        var result = ledger.MoveToSavings(runId, request.IdempotencyKey, request.CashAccountId, request.SavingsAccountId, request.AmountSen, request.TransactionLimitSen);
+        var result = ledger.MoveToSavings(runId, request.IdempotencyKey, request.CashAccountId, request.SavingsAccountId, request.AmountSen);
         return Results.Ok(new { result.JournalId, result.Committed, result.WasIdempotentReplay });
     }
     catch (Finmind.Api.Finance.IdempotencyConflictException) { return Results.Conflict(new { error = "Idempotency key reused with a different payload." }); }
@@ -77,7 +84,7 @@ app.MapPost("/internal/runs/{runId:guid}/bill-payments", (Guid runId, BillPaymen
 {
     try
     {
-        var result = ledger.PayObligation(runId, request.IdempotencyKey, request.CashAccountId, request.ObligationId, request.TransactionLimitSen);
+        var result = ledger.PayObligation(runId, request.IdempotencyKey, request.CashAccountId, request.ObligationId);
         return Results.Ok(new { result.JournalId, result.Committed, result.WasIdempotentReplay });
     }
     catch (Finmind.Api.Finance.IdempotencyConflictException) { return Results.Conflict(new { error = "Idempotency key reused with a different payload." }); }
@@ -100,8 +107,8 @@ app.MapGet("/internal/runs/{runId:guid}/obligations/{obligationId:guid}", (Guid 
 app.Run("http://127.0.0.1:5080");
 
 internal sealed record CreateAccountRequest(string Kind);
-internal sealed record FundingRequest(string IdempotencyKey, long AmountSen);
-internal sealed record TransferRequest(string IdempotencyKey, Guid SourceAccountId, Guid DestinationAccountId, long AmountSen, long TransactionLimitSen);
-internal sealed record SavingsRequest(string IdempotencyKey, Guid CashAccountId, Guid SavingsAccountId, long AmountSen, long TransactionLimitSen);
-internal sealed record BillPaymentRequest(string IdempotencyKey, Guid CashAccountId, Guid ObligationId, long TransactionLimitSen);
+internal sealed record FundingRequest(string IdempotencyKey, long AmountSen, long TransactionLimitSen);
+internal sealed record TransferRequest(string IdempotencyKey, Guid SourceAccountId, Guid DestinationAccountId, long AmountSen);
+internal sealed record SavingsRequest(string IdempotencyKey, Guid CashAccountId, Guid SavingsAccountId, long AmountSen);
+internal sealed record BillPaymentRequest(string IdempotencyKey, Guid CashAccountId, Guid ObligationId);
 internal sealed record CreateObligationRequest(Guid MerchantAccountId, long AmountSen);

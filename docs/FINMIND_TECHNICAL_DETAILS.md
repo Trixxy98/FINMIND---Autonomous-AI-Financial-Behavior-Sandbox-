@@ -35,6 +35,8 @@ Untrusted content is data, never executable instruction. It cannot alter roles, 
 ### Initial PostgreSQL migration status
 `infra/db/migrations/001_ledger.sql` creates the initial run/account/journal/posting/obligation schema. Composite foreign keys keep postings within one run and currency; deferred constraint triggers require exactly two distinct, balanced postings with account kinds allowed by journal kind; unique constraints enforce run-scoped idempotency and one opening-funding journal per run; journal entries and postings are append-only. The local API now uses `PostgresLedger`; `InMemoryLedger` remains for deterministic unit tests. PostgreSQL-backed transactions serialize mutations per run and validate available funds in the application. Database-role separation, caller authorization, run lifecycle/policy, and durable audit events remain unimplemented, so the internal API must remain localhost-only.
 
+`infra/db/migrations/002_run_transaction_policy.sql` adds a positive per-run transaction cap. It is set during run initialization, immutable once configured, and read by the finance boundary for transfer, savings, and bill-payment commits; action requests cannot supply or raise the cap. Legacy runs with no stored cap fail closed for monetary actions.
+
 ### Commit procedure
 1. Authenticate trusted caller and resolve scoped run principal server-side.
 2. Validate schema, run state, tool grant, ownership, currency, amount, destination, limits, and idempotency.

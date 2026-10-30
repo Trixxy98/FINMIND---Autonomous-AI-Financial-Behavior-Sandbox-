@@ -6,6 +6,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="Finance.Tests/**/*.cs" />
+    <Content Remove="Finance.Tests/**" />
+    <None Remove="Finance.Tests/**" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Npgsql" Version="10.0.3" />

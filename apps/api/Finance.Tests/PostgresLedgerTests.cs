@@ -13,9 +13,9 @@ public sealed class PostgresLedgerTests
         using var dataSource = NpgsqlDataSource.Create(connectionString);
         var ledger = new PostgresLedger(dataSource);
 
-        var first = ledger.OpenRun(runId, "open-1", 25_000);
+        var first = ledger.OpenRun(runId, "open-1", 25_000, 500);
         var restartedLedger = new PostgresLedger(dataSource);
-        var retry = restartedLedger.OpenRun(runId, "open-1", 25_000);
+        var retry = restartedLedger.OpenRun(runId, "open-1", 25_000, 500);
 
         Assert.Equal(first.CashAccountId, retry.CashAccountId);
         Assert.True(retry.WasIdempotentReplay);
@@ -29,10 +29,10 @@ public sealed class PostgresLedgerTests
         using var dataSource = NpgsqlDataSource.Create(connectionString);
         var runId = Guid.NewGuid();
         var ledger = new PostgresLedger(dataSource);
-        var cashId = ledger.OpenRun(runId, "open", 100).CashAccountId;
+        var cashId = ledger.OpenRun(runId, "open", 100, 100).CashAccountId;
         var merchantId = ledger.CreateAccount(runId, AccountKind.Merchant);
-        var first = ledger.Transfer(runId, "first-transfer", cashId, merchantId, 10, 100);
-        var replay = ledger.Transfer(runId, "first-transfer", cashId, merchantId, 10, 100);
+        var first = ledger.Transfer(runId, "first-transfer", cashId, merchantId, 10);
+        var replay = ledger.Transfer(runId, "first-transfer", cashId, merchantId, 10);
 
         Assert.Equal(first.JournalId, replay.JournalId);
         Assert.True(replay.WasIdempotentReplay);
@@ -41,7 +41,7 @@ public sealed class PostgresLedgerTests
         {
             try
             {
-                ledger.Transfer(runId, $"concurrent-{index}", cashId, merchantId, 10, 100);
+                ledger.Transfer(runId, $"concurrent-{index}", cashId, merchantId, 10);
                 return true;
             }
             catch (LedgerValidationException)
@@ -67,19 +67,19 @@ public sealed class PostgresLedgerTests
         using var dataSource = NpgsqlDataSource.Create(connectionString);
         var runId = Guid.NewGuid();
         var ledger = new PostgresLedger(dataSource);
-        var cashId = ledger.OpenRun(runId, "open", 500).CashAccountId;
+        var cashId = ledger.OpenRun(runId, "open", 500, 200).CashAccountId;
         var merchantId = ledger.CreateAccount(runId, AccountKind.Merchant);
         var obligation = ledger.CreateObligation(runId, merchantId, 120);
 
-        var payment = ledger.PayObligation(runId, "bill-1", cashId, obligation.ObligationId, 200);
-        var retry = ledger.PayObligation(runId, "bill-1", cashId, obligation.ObligationId, 200);
+        var payment = ledger.PayObligation(runId, "bill-1", cashId, obligation.ObligationId);
+        var retry = ledger.PayObligation(runId, "bill-1", cashId, obligation.ObligationId);
 
         Assert.Equal(payment.JournalId, retry.JournalId);
         Assert.True(retry.WasIdempotentReplay);
         Assert.True(new PostgresLedger(dataSource).GetObligation(runId, obligation.ObligationId).Paid);
         Assert.Equal(380, ledger.GetBalance(runId, cashId));
         Assert.Equal(120, ledger.GetBalance(runId, merchantId));
-        Assert.Throws<LedgerValidationException>(() => ledger.PayObligation(runId, "bill-2", cashId, obligation.ObligationId, 200));
+        Assert.Throws<LedgerValidationException>(() => ledger.PayObligation(runId, "bill-2", cashId, obligation.ObligationId));
     }
 
     [PostgresFact]
@@ -90,17 +90,42 @@ public sealed class PostgresLedgerTests
         var ledger = new PostgresLedger(dataSource);
         var runId = Guid.NewGuid();
         var results = await Task.WhenAll(Enumerable.Range(0, 12)
-            .Select(_ => Task.Run(() => ledger.OpenRun(runId, "shared-open", 1_000))));
+            .Select(_ => Task.Run(() => ledger.OpenRun(runId, "shared-open", 1_000, 200))));
 
         Assert.Single(results.Select(result => result.CashAccountId).Distinct());
         Assert.Single(ledger.GetJournals(runId));
 
         var otherRunId = Guid.NewGuid();
-        var otherCash = ledger.OpenRun(otherRunId, "other-open", 1_000).CashAccountId;
+        var otherCash = ledger.OpenRun(otherRunId, "other-open", 1_000, 200).CashAccountId;
         var merchant = ledger.CreateAccount(runId, AccountKind.Merchant);
-        Assert.Throws<LedgerValidationException>(() => ledger.Transfer(runId, "cross-run", otherCash, merchant, 10, 100));
+        Assert.Throws<LedgerValidationException>(() => ledger.Transfer(runId, "cross-run", otherCash, merchant, 10));
         Assert.Equal(1_000, ledger.GetBalance(otherRunId, otherCash));
         Assert.Equal(0, ledger.GetBalance(runId, merchant));
+    }
+
+    [PostgresFact]
+    public void Transaction_cap_is_stored_on_run_and_not_overridable_by_action_request()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("FINMIND_TEST_DATABASE")!;
+        using var dataSource = NpgsqlDataSource.Create(connectionString);
+        var runId = Guid.NewGuid();
+        var ledger = new PostgresLedger(dataSource);
+        var cashId = ledger.OpenRun(runId, "open", 1_000, 100).CashAccountId;
+        var merchantId = ledger.CreateAccount(runId, AccountKind.Merchant);
+
+        Assert.Throws<LedgerValidationException>(() => ledger.Transfer(runId, "over-cap", cashId, merchantId, 101));
+        Assert.Equal(1_000, ledger.GetBalance(runId, cashId));
+        Assert.Equal(0, ledger.GetBalance(runId, merchantId));
+
+        ledger.Transfer(runId, "at-cap", cashId, merchantId, 100);
+        Assert.Throws<IdempotencyConflictException>(() => ledger.OpenRun(runId, "open", 1_000, 101));
+
+        using var updateConnection = dataSource.OpenConnection();
+        using var update = new NpgsqlCommand(
+            "UPDATE experiment_runs SET transaction_limit_sen = 101 WHERE id = @run_id", updateConnection);
+        update.Parameters.AddWithValue("run_id", runId);
+        var exception = Assert.Throws<PostgresException>(() => update.ExecuteNonQuery());
+        Assert.Equal("55000", exception.SqlState);
     }
 }
 
