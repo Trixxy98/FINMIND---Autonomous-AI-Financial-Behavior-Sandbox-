@@ -1,0 +1,101 @@
+name: FINMIND CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: finmind_test
+          POSTGRES_USER: finmind
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U finmind -d finmind_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      FINMIND_TEST_DATABASE: "Host=localhost;Port=5432;Database=finmind_test;Username=finmind;Password=ci-only-password"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Validate Compose configuration
+        run: docker compose -f infra/compose.yaml config --quiet
+
+      - name: Apply database migrations
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          for migration in infra/db/migrations/*.sql; do
+            echo "Applying $migration"
+            docker exec -i "$POSTGRES_CONTAINER_ID" \
+              psql -v ON_ERROR_STOP=1 -U finmind -d finmind_test \
+              < "$migration"
+          done
+
+      - name: Restore .NET dependencies
+        run: dotnet restore apps/api/Finance.Tests/Finmind.Finance.Tests.csproj
+
+      - name: Build API and finance tests
+        run: dotnet build apps/api/Finance.Tests/Finmind.Finance.Tests.csproj --configuration Release --no-restore
+
+      - name: Run finance unit and PostgreSQL integration tests
+        run: dotnet test apps/api/Finance.Tests/Finmind.Finance.Tests.csproj --configuration Release --no-build --no-restore
+
+      - name: Run runtime tests
+        run: python -B -m unittest discover -s services/agent-runtime/tests -v
+
+      - name: Install web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Run web tests
+        working-directory: apps/web
+        run: npm test
+
+      - name: Build web
+        working-directory: apps/web
+        run: npm run build

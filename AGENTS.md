@@ -38,6 +38,13 @@ These rules apply to AI coding assistants and human contributors working in this
 
 ## Implementation workflow
 
+### User working preference
+
+- Do not automatically write or edit project code. Provide changes in chat for the user to copy and paste into their IDE, unless the user explicitly authorizes direct edits.
+- Put a simple explanation immediately above each code block and identify the target file and whether to create, replace, or insert content.
+- Proceed in manageable steps and distinguish suggested commands from checks actually run.
+- This preference persists across sessions; documentation edits explicitly requested to save preferences are allowed.
+
 1. Inspect the relevant existing files and conventions before editing; avoid broad unrelated changes.
 2. Work in the documented release phases and stop at phase boundaries when requested.
 3. Define or update contracts before relying on them across services.
