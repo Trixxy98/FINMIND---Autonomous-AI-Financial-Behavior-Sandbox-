@@ -136,44 +136,141 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
             "approved virtual bill payment", [new(cashAccountId, checked(-amountSen)), new(merchantAccountId, amountSen)]));
     }
 
-    public ObligationResult CreateObligation(Guid runId, Guid merchantAccountId, long amountSen)
+    public ObligationResult CreateObligation(
+        Guid runId,
+        Guid merchantAccountId,
+        long amountSen,
+        string invoiceReference)
     {
         if (runId == Guid.Empty || amountSen <= 0)
-            throw new LedgerValidationException("Run ID and positive obligation amount are required.");
+            throw new LedgerValidationException(
+                "Run ID and positive obligation amount are required.");
+
+        InvoiceReferences.Validate(invoiceReference);
 
         using var connection = dataSource.OpenConnection();
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginTransaction(
+            IsolationLevel.ReadCommitted);
+
         LockExistingRun(connection, transaction, runId);
+
         if (GetRunTransactionLimit(connection, transaction, runId) is null)
-            throw new LedgerValidationException("Run transaction policy is not configured.");
-        var kinds = LoadAccountKinds(connection, transaction, runId, [new PostingRequest(merchantAccountId, 1)]);
-        if (kinds.Count != 1 || kinds[merchantAccountId] != AccountKind.Merchant)
-            throw new LedgerValidationException("Obligation payee must be a merchant in this run.");
+            throw new LedgerValidationException(
+                "Run transaction policy is not configured.");
+
+        using (var existingCommand = new NpgsqlCommand(
+            """
+            SELECT id, merchant_account_id, amount_sen, paid,
+                invoice_reference
+            FROM obligations
+            WHERE run_id = @run_id
+            AND invoice_reference = @invoice_reference
+            """,
+            connection, transaction))
+        {
+            existingCommand.Parameters.AddWithValue("run_id", runId);
+            existingCommand.Parameters.AddWithValue(
+                "invoice_reference", invoiceReference);
+
+            using var reader = existingCommand.ExecuteReader();
+
+            if (reader.Read())
+            {
+                var existing = new ObligationResult(
+                    reader.GetGuid(0),
+                    reader.GetGuid(1),
+                    reader.GetInt64(2),
+                    reader.GetBoolean(3),
+                    reader.GetString(4));
+
+                reader.Close();
+
+                if (existing.MerchantAccountId != merchantAccountId
+                    || existing.AmountSen != amountSen)
+                {
+                    throw new IdempotencyConflictException(
+                        "Invoice reference was previously used with a different payload.");
+                }
+
+                transaction.Commit();
+                return existing;
+            }
+        }
+
+        var kinds = LoadAccountKinds(
+            connection,
+            transaction,
+            runId,
+            [new PostingRequest(merchantAccountId, 1)]);
+
+        if (kinds.Count != 1
+            || kinds[merchantAccountId] != AccountKind.Merchant)
+        {
+            throw new LedgerValidationException(
+                "Obligation payee must be a merchant in this run.");
+        }
 
         var obligationId = Guid.NewGuid();
+
         using var command = new NpgsqlCommand(
-            "INSERT INTO obligations (id, run_id, merchant_account_id, amount_sen) " +
-            "VALUES (@id, @run_id, @merchant_id, @amount_sen)", connection, transaction);
+            """
+            INSERT INTO obligations
+                (id, run_id, merchant_account_id,
+                amount_sen, invoice_reference)
+            VALUES
+                (@id, @run_id, @merchant_id,
+                @amount_sen, @invoice_reference)
+            """,
+            connection, transaction);
+
         command.Parameters.AddWithValue("id", obligationId);
         command.Parameters.AddWithValue("run_id", runId);
         command.Parameters.AddWithValue("merchant_id", merchantAccountId);
         command.Parameters.AddWithValue("amount_sen", amountSen);
+        command.Parameters.AddWithValue(
+            "invoice_reference", invoiceReference);
+
         command.ExecuteNonQuery();
         transaction.Commit();
-        return new ObligationResult(obligationId, merchantAccountId, amountSen, false);
+
+        return new ObligationResult(
+            obligationId,
+            merchantAccountId,
+            amountSen,
+            false,
+            invoiceReference);
     }
 
-    public ObligationResult GetObligation(Guid runId, Guid obligationId)
+    public ObligationResult GetObligation(
+        Guid runId,
+        Guid obligationId)
     {
         using var connection = dataSource.OpenConnection();
+
         using var command = new NpgsqlCommand(
-            "SELECT merchant_account_id, amount_sen, paid FROM obligations WHERE id = @id AND run_id = @run_id",
+            """
+            SELECT merchant_account_id, amount_sen, paid,
+                invoice_reference
+            FROM obligations
+            WHERE id = @id AND run_id = @run_id
+            """,
             connection);
+
         command.Parameters.AddWithValue("id", obligationId);
         command.Parameters.AddWithValue("run_id", runId);
+
         using var reader = command.ExecuteReader();
-        if (!reader.Read()) throw new LedgerValidationException("Obligation not found in this run.");
-        return new ObligationResult(obligationId, reader.GetGuid(0), reader.GetInt64(1), reader.GetBoolean(2));
+
+        if (!reader.Read())
+            throw new LedgerValidationException(
+                "Obligation not found in this run.");
+
+        return new ObligationResult(
+            obligationId,
+            reader.GetGuid(0),
+            reader.GetInt64(1),
+            reader.GetBoolean(2),
+            reader.GetString(3));
     }
 
     public CommitResult PayObligation(Guid runId, string idempotencyKey, Guid cashAccountId,

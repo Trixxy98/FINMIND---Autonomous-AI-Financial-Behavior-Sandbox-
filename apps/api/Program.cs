@@ -92,10 +92,32 @@ app.MapPost("/internal/runs/{runId:guid}/bill-payments", (Guid runId, BillPaymen
     catch (OverflowException) { return Results.BadRequest(new { error = "Amount exceeds supported range." }); }
 });
 
-app.MapPost("/internal/runs/{runId:guid}/obligations", (Guid runId, CreateObligationRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
+app.MapPost("/internal/runs/{runId:guid}/obligations",
+    (Guid runId,
+     CreateObligationRequest request,
+     Finmind.Api.Finance.PostgresLedger ledger) =>
 {
-    try { return Results.Created($"/internal/runs/{runId}/obligations", ledger.CreateObligation(runId, request.MerchantAccountId, request.AmountSen)); }
-    catch (Finmind.Api.Finance.LedgerValidationException ex) { return Results.BadRequest(new { error = ex.Message }); }
+    try
+    {
+        var obligation = ledger.CreateObligation(
+            runId,
+            request.MerchantAccountId,
+            request.AmountSen,
+            request.InvoiceReference);
+
+        return Results.Ok(obligation);
+    }
+    catch (Finmind.Api.Finance.IdempotencyConflictException)
+    {
+        return Results.Conflict(new
+        {
+            error = "Invoice reference reused with different details."
+        });
+    }
+    catch (Finmind.Api.Finance.LedgerValidationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapGet("/internal/runs/{runId:guid}/obligations/{obligationId:guid}", (Guid runId, Guid obligationId, Finmind.Api.Finance.PostgresLedger ledger) =>
@@ -111,4 +133,4 @@ internal sealed record FundingRequest(string IdempotencyKey, long AmountSen, lon
 internal sealed record TransferRequest(string IdempotencyKey, Guid SourceAccountId, Guid DestinationAccountId, long AmountSen);
 internal sealed record SavingsRequest(string IdempotencyKey, Guid CashAccountId, Guid SavingsAccountId, long AmountSen);
 internal sealed record BillPaymentRequest(string IdempotencyKey, Guid CashAccountId, Guid ObligationId);
-internal sealed record CreateObligationRequest(Guid MerchantAccountId, long AmountSen);
+internal sealed record CreateObligationRequest(Guid MerchantAccountId, long AmountSen, string InvoiceReference);

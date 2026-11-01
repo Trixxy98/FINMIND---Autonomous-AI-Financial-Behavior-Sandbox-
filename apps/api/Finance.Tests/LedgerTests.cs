@@ -207,7 +207,7 @@ public sealed class LedgerTests
         var merchant = ledger.CreateAccount(run, AccountKind.Merchant);
         var otherMerchant = ledger.CreateAccount(otherRun, AccountKind.Merchant);
         ledger.Commit(new JournalRequest(run, "fund-obligation-test", JournalKind.OpeningFunding, "opening", [new(treasury, -500), new(cash, 500)]));
-        var obligation = ledger.CreateObligation(run, merchant, 125);
+        var obligation = ledger.CreateObligation(run, merchant, 125, "INV-MEMORY-001");
 
         Assert.Throws<LedgerValidationException>(() => ledger.GetObligation(otherRun, obligation.ObligationId));
         var paid = ledger.PayObligation(run, "bill-key", cash, obligation.ObligationId, 200);
@@ -240,5 +240,151 @@ public sealed class LedgerTests
         Assert.Equal(0, ledger.GetBalance(run, cash));
         Assert.Equal(100, ledger.GetBalance(run, merchant));
         Assert.All(ledger.GetJournals(run), journal => Assert.Equal(0, journal.Postings.Sum(p => p.AmountSen)));
+    }
+
+    [Fact]
+    public void Duplicate_invoice_has_one_obligation_and_one_payment()
+    {
+        var ledger = new InMemoryLedger();
+        var runId = Guid.NewGuid();
+        var cashId = ledger.OpenRun(runId, "open", 1_000).CashAccountId;
+        var merchantId = ledger.CreateAccount(runId, AccountKind.Merchant);
+        var otherMerchantId = ledger.CreateAccount(
+            runId, AccountKind.Merchant);
+
+        var first = ledger.CreateObligation(
+            runId, merchantId, 120, "INV-DUPLICATE-001");
+
+        var retry = ledger.CreateObligation(
+            runId, merchantId, 120, "INV-DUPLICATE-001");
+
+        Assert.Equal(first, retry);
+
+        Assert.Throws<IdempotencyConflictException>(() =>
+            ledger.CreateObligation(
+                runId, merchantId, 121, "INV-DUPLICATE-001"));
+
+        Assert.Throws<IdempotencyConflictException>(() =>
+            ledger.CreateObligation(
+                runId, otherMerchantId, 120, "INV-DUPLICATE-001"));
+
+        Assert.Equal(first, ledger.GetObligation(runId, first.ObligationId));
+        Assert.Equal(1_000, ledger.GetBalance(runId, cashId));
+        Assert.Equal(0, ledger.GetBalance(runId, merchantId));
+        Assert.Single(ledger.GetJournals(runId));
+
+        var payment = ledger.PayObligation(
+            runId, "payment", cashId, first.ObligationId, 200);
+
+        var afterPayment = ledger.CreateObligation(
+            runId, merchantId, 120, "INV-DUPLICATE-001");
+
+        Assert.Equal(first.ObligationId, afterPayment.ObligationId);
+        Assert.True(afterPayment.Paid);
+
+        var paymentRetry = ledger.PayObligation(
+            runId, "payment", cashId, afterPayment.ObligationId, 200);
+
+        Assert.Equal(payment.JournalId, paymentRetry.JournalId);
+        Assert.True(paymentRetry.WasIdempotentReplay);
+
+        Assert.Throws<LedgerValidationException>(() =>
+            ledger.PayObligation(
+                runId, "second-payment", cashId,
+                afterPayment.ObligationId, 200));
+
+        Assert.Equal(880, ledger.GetBalance(runId, cashId));
+        Assert.Equal(120, ledger.GetBalance(runId, merchantId));
+        Assert.Equal(0, ledger.GetBalance(runId, otherMerchantId));
+        Assert.Equal(2, ledger.GetJournals(runId).Count);
+    }
+
+    [Fact]
+    public async Task Concurrent_invoice_delivery_creates_one_obligation()
+    {
+        var ledger = new InMemoryLedger();
+        var runId = Guid.NewGuid();
+        var cashId = ledger.OpenRun(runId, "open", 1_000).CashAccountId;
+        var merchantId = ledger.CreateAccount(
+            runId, AccountKind.Merchant);
+
+        var requests = Enumerable.Range(0, 12).Select(index =>
+            Task.Run(() => ledger.CreateObligation(
+                runId, merchantId, 120, "INV-CONCURRENT-001")));
+
+        var results = await Task.WhenAll(requests);
+
+        Assert.Single(results.Select(result => result.ObligationId).Distinct());
+        Assert.All(results, result =>
+        {
+            Assert.Equal("INV-CONCURRENT-001", result.InvoiceReference);
+            Assert.Equal(120, result.AmountSen);
+            Assert.False(result.Paid);
+        });
+
+        Assert.Equal(1_000, ledger.GetBalance(runId, cashId));
+        Assert.Equal(0, ledger.GetBalance(runId, merchantId));
+        Assert.Single(ledger.GetJournals(runId));
+    }
+
+    [Fact]
+    public void Invoice_references_are_validated_case_sensitive_and_run_scoped()
+    {
+        var ledger = new InMemoryLedger();
+        var runId = Guid.NewGuid();
+        var cashId = ledger.OpenRun(runId, "open", 1_000).CashAccountId;
+        var merchantId = ledger.CreateAccount(
+            runId, AccountKind.Merchant);
+
+        var invalidReferences = new string[]
+        {
+            null!,
+            "",
+            " ",
+            " INV-001",
+            "INV-001 ",
+            "\tINV-001",
+            "INV-001\n",
+            "legacy:existing"
+        };
+
+        foreach (var reference in invalidReferences)
+        {
+            Assert.Throws<LedgerValidationException>(() =>
+                ledger.CreateObligation(
+                    runId, merchantId, 120, reference));
+        }
+
+        var first = ledger.CreateObligation(
+            runId, merchantId, 120, "INV-SCOPED-001");
+
+        var differentlyCased = ledger.CreateObligation(
+            runId, merchantId, 120, "inv-scoped-001");
+
+        Assert.NotEqual(first.ObligationId, differentlyCased.ObligationId);
+
+        var otherRunId = Guid.NewGuid();
+        var otherCashId = ledger.OpenRun(
+            otherRunId, "open", 1_000).CashAccountId;
+        var otherMerchantId = ledger.CreateAccount(
+            otherRunId, AccountKind.Merchant);
+
+        var other = ledger.CreateObligation(
+            otherRunId, otherMerchantId, 120, "INV-SCOPED-001");
+
+        Assert.NotEqual(first.ObligationId, other.ObligationId);
+
+        Assert.Throws<LedgerValidationException>(() =>
+            ledger.GetObligation(runId, other.ObligationId));
+
+        Assert.Throws<LedgerValidationException>(() =>
+            ledger.GetObligation(otherRunId, first.ObligationId));
+
+        Assert.Equal(1_000, ledger.GetBalance(runId, cashId));
+        Assert.Equal(1_000, ledger.GetBalance(otherRunId, otherCashId));
+        Assert.Equal(0, ledger.GetBalance(runId, merchantId));
+        Assert.Equal(0, ledger.GetBalance(otherRunId, otherMerchantId));
+        Assert.Single(ledger.GetJournals(runId));
+        Assert.Single(ledger.GetJournals(otherRunId));
     }
 }

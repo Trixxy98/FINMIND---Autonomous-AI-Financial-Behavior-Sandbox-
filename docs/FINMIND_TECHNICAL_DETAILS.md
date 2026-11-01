@@ -37,6 +37,21 @@ Untrusted content is data, never executable instruction. It cannot alter roles, 
 
 `infra/db/migrations/002_run_transaction_policy.sql` adds a positive per-run transaction cap. It is set during run initialization, immutable once configured, and read by the finance boundary for transfer, savings, and bill-payment commits; action requests cannot supply or raise the cap. Legacy runs with no stored cap fail closed for monetary actions.
 
+`infra/db/migrations/003_obligation_invoice_identity.sql` adds
+case-sensitive invoice references unique within each run. Existing
+obligations receive reserved `legacy:<UUID>` references without changing
+their IDs or payment links. Both ledger implementations reject blank,
+padded, and reserved references. Identical creation retries return the
+stored obligation and its current payment status; a changed merchant or
+amount conflicts without changing state. PostgreSQL serializes creation
+per run and enforces uniqueness with a database index.
+
+The local obligation setup request now requires `invoiceReference`.
+Successful creation or retry returns HTTP 200 with the stored obligation,
+including its reference. Conflicting details return HTTP 409, while
+ledger validation failures return HTTP 400. Creation never moves money.
+The endpoint remains unauthenticated localhost-only development scaffolding.
+
 ### Commit procedure
 1. Authenticate trusted caller and resolve scoped run principal server-side.
 2. Validate schema, run state, tool grant, ownership, currency, amount, destination, limits, and idempotency.

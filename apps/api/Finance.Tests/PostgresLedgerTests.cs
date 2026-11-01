@@ -69,7 +69,7 @@ public sealed class PostgresLedgerTests
         var ledger = new PostgresLedger(dataSource);
         var cashId = ledger.OpenRun(runId, "open", 500, 200).CashAccountId;
         var merchantId = ledger.CreateAccount(runId, AccountKind.Merchant);
-        var obligation = ledger.CreateObligation(runId, merchantId, 120);
+        var obligation = ledger.CreateObligation(runId, merchantId, 120, "INV-PAYMENT-001");
 
         var payment = ledger.PayObligation(runId, "bill-1", cashId, obligation.ObligationId);
         var retry = ledger.PayObligation(runId, "bill-1", cashId, obligation.ObligationId);
@@ -102,7 +102,7 @@ public sealed class PostgresLedgerTests
         Assert.Equal(savingsMove.JournalId, savingsRetry.JournalId);
         Assert.True(savingsRetry.WasIdempotentReplay);
 
-        var overCapBill = ledger.CreateObligation(runId, merchantId, 101);
+        var overCapBill = ledger.CreateObligation(runId, merchantId, 101, "INV-OVER-CAP-001");
         Assert.Throws<LedgerValidationException>(() => ledger.PayObligation(runId, "bill-over-cap", cashId, overCapBill.ObligationId));
         Assert.False(ledger.GetObligation(runId, overCapBill.ObligationId).Paid);
         Assert.Equal(900, ledger.GetBalance(runId, cashId));
@@ -110,7 +110,7 @@ public sealed class PostgresLedgerTests
         Assert.Equal(0, ledger.GetBalance(runId, merchantId));
         Assert.Equal(2, ledger.GetJournals(runId).Count);
 
-        var bill = ledger.CreateObligation(runId, merchantId, 100);
+        var bill = ledger.CreateObligation(runId, merchantId, 100, "INV-AT-CAP-001");
         var payment = ledger.PayObligation(runId, "bill-at-cap", cashId, bill.ObligationId);
         var paymentRetry = ledger.PayObligation(runId, "bill-at-cap", cashId, bill.ObligationId);
         Assert.Equal(payment.JournalId, paymentRetry.JournalId);
@@ -217,6 +217,189 @@ public sealed class PostgresLedgerTests
         Assert.Throws<LedgerValidationException>(() => ledger.OpenRun(runId, "new-opening", 500, 100));
         Assert.Single(ledger.GetJournals(runId));
         Assert.Equal(10, ledger.GetBalance(runId, cashId));
+    }
+
+    [PostgresFact]
+    public void Duplicate_invoice_has_one_durable_obligation_and_one_payment()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(
+            "FINMIND_TEST_DATABASE")!;
+
+        using var dataSource = NpgsqlDataSource.Create(connectionString);
+        var ledger = new PostgresLedger(dataSource);
+        var runId = Guid.NewGuid();
+        var cashId = ledger.OpenRun(
+            runId, "open", 1_000, 200).CashAccountId;
+
+        var merchantId = ledger.CreateAccount(runId, AccountKind.Merchant);
+        var otherMerchantId = ledger.CreateAccount(
+            runId, AccountKind.Merchant);
+
+        var first = ledger.CreateObligation(
+            runId, merchantId, 120, "INV-DUPLICATE-001");
+
+        var restartedLedger = new PostgresLedger(dataSource);
+        var retry = restartedLedger.CreateObligation(
+            runId, merchantId, 120, "INV-DUPLICATE-001");
+
+        Assert.Equal(first, retry);
+
+        Assert.Throws<IdempotencyConflictException>(() =>
+            ledger.CreateObligation(
+                runId, merchantId, 121, "INV-DUPLICATE-001"));
+
+        Assert.Throws<IdempotencyConflictException>(() =>
+            ledger.CreateObligation(
+                runId, otherMerchantId, 120, "INV-DUPLICATE-001"));
+
+        Assert.Equal(first, ledger.GetObligation(runId, first.ObligationId));
+        Assert.Equal(1_000, ledger.GetBalance(runId, cashId));
+        Assert.Equal(0, ledger.GetBalance(runId, merchantId));
+        Assert.Single(ledger.GetJournals(runId));
+
+        var payment = ledger.PayObligation(
+            runId, "payment", cashId, first.ObligationId);
+
+        var afterPayment = restartedLedger.CreateObligation(
+            runId, merchantId, 120, "INV-DUPLICATE-001");
+
+        Assert.Equal(first.ObligationId, afterPayment.ObligationId);
+        Assert.True(afterPayment.Paid);
+
+        var paymentRetry = restartedLedger.PayObligation(
+            runId, "payment", cashId, afterPayment.ObligationId);
+
+        Assert.Equal(payment.JournalId, paymentRetry.JournalId);
+        Assert.True(paymentRetry.WasIdempotentReplay);
+
+        Assert.Throws<LedgerValidationException>(() =>
+            ledger.PayObligation(
+                runId, "second-payment", cashId,
+                afterPayment.ObligationId));
+
+        Assert.Equal(880, ledger.GetBalance(runId, cashId));
+        Assert.Equal(120, ledger.GetBalance(runId, merchantId));
+        Assert.Equal(0, ledger.GetBalance(runId, otherMerchantId));
+        Assert.Equal(2, ledger.GetJournals(runId).Count);
+    }
+
+    [PostgresFact]
+    public async Task Concurrent_invoice_delivery_persists_one_obligation()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(
+            "FINMIND_TEST_DATABASE")!;
+
+        using var dataSource = NpgsqlDataSource.Create(connectionString);
+        var ledger = new PostgresLedger(dataSource);
+        var runId = Guid.NewGuid();
+        var cashId = ledger.OpenRun(
+            runId, "open", 1_000, 200).CashAccountId;
+        var merchantId = ledger.CreateAccount(
+            runId, AccountKind.Merchant);
+
+        var requests = Enumerable.Range(0, 12).Select(index =>
+            Task.Run(() => new PostgresLedger(dataSource).CreateObligation(
+                runId, merchantId, 120, "INV-CONCURRENT-001")));
+
+        var results = await Task.WhenAll(requests);
+
+        Assert.Single(results.Select(result => result.ObligationId).Distinct());
+        Assert.All(results, result =>
+        {
+            Assert.Equal("INV-CONCURRENT-001", result.InvoiceReference);
+            Assert.Equal(120, result.AmountSen);
+            Assert.False(result.Paid);
+        });
+
+        using var connection = dataSource.OpenConnection();
+        using var command = new NpgsqlCommand(
+            """
+            SELECT COUNT(*)
+            FROM obligations
+            WHERE run_id = @run_id
+            """,
+            connection);
+
+        command.Parameters.AddWithValue("run_id", runId);
+        Assert.Equal(1L, (long)command.ExecuteScalar()!);
+
+        Assert.Equal(1_000, ledger.GetBalance(runId, cashId));
+        Assert.Equal(0, ledger.GetBalance(runId, merchantId));
+        Assert.Single(ledger.GetJournals(runId));
+    }
+
+    [PostgresFact]
+    public void Invoice_references_are_validated_case_sensitive_and_run_scoped()
+    {
+        var connectionString = Environment.GetEnvironmentVariable(
+            "FINMIND_TEST_DATABASE")!;
+
+        using var dataSource = NpgsqlDataSource.Create(connectionString);
+        var ledger = new PostgresLedger(dataSource);
+        var runId = Guid.NewGuid();
+        var cashId = ledger.OpenRun(
+            runId, "open", 1_000, 200).CashAccountId;
+        var merchantId = ledger.CreateAccount(
+            runId, AccountKind.Merchant);
+
+        var invalidReferences = new string[]
+        {
+            null!,
+            "",
+            " ",
+            " INV-001",
+            "INV-001 ",
+            "\tINV-001",
+            "INV-001\n",
+            "legacy:existing"
+        };
+
+        foreach (var reference in invalidReferences)
+        {
+            Assert.Throws<LedgerValidationException>(() =>
+                ledger.CreateObligation(
+                    runId, merchantId, 120, reference));
+        }
+
+        var first = ledger.CreateObligation(
+            runId, merchantId, 120, "INV-SCOPED-001");
+
+        var differentlyCased = ledger.CreateObligation(
+            runId, merchantId, 120, "inv-scoped-001");
+
+        Assert.NotEqual(first.ObligationId, differentlyCased.ObligationId);
+
+        var otherRunId = Guid.NewGuid();
+        var otherCashId = ledger.OpenRun(
+            otherRunId, "open", 1_000, 200).CashAccountId;
+        var otherMerchantId = ledger.CreateAccount(
+            otherRunId, AccountKind.Merchant);
+
+        var other = ledger.CreateObligation(
+            otherRunId, otherMerchantId, 120, "INV-SCOPED-001");
+
+        Assert.NotEqual(first.ObligationId, other.ObligationId);
+
+        Assert.Throws<LedgerValidationException>(() =>
+            ledger.GetObligation(runId, other.ObligationId));
+
+        Assert.Throws<LedgerValidationException>(() =>
+            ledger.GetObligation(otherRunId, first.ObligationId));
+
+        using var connection = dataSource.OpenConnection();
+        using var count = new NpgsqlCommand(
+            "SELECT COUNT(*) FROM obligations WHERE run_id = @run_id",
+            connection);
+
+        count.Parameters.AddWithValue("run_id", runId);
+        Assert.Equal(2L, (long)count.ExecuteScalar()!);
+
+        Assert.Equal(1_000, ledger.GetBalance(runId, cashId));
+        Assert.Equal(1_000, ledger.GetBalance(otherRunId, otherCashId));
+        Assert.Equal(0, ledger.GetBalance(runId, merchantId));
+        Assert.Equal(0, ledger.GetBalance(otherRunId, otherMerchantId));
+        Assert.Single(ledger.GetJournals(runId));
+        Assert.Single(ledger.GetJournals(otherRunId));
     }
 }
 

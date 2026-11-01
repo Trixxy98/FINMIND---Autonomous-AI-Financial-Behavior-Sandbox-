@@ -8,9 +8,26 @@ public sealed record LedgerPosting(Guid AccountId, long AmountSen);
 public sealed record LedgerJournal(Guid JournalId, Guid RunId, string IdempotencyKey, JournalKind Kind, string Description, IReadOnlyList<LedgerPosting> Postings);
 public sealed record CommitResult(Guid JournalId, bool Committed, bool WasIdempotentReplay);
 public sealed record OpenRunResult(Guid JournalId, bool Committed, bool WasIdempotentReplay, Guid CashAccountId);
-public sealed record ObligationResult(Guid ObligationId, Guid MerchantAccountId, long AmountSen, bool Paid);
+public sealed record ObligationResult(Guid ObligationId, Guid MerchantAccountId, long AmountSen, bool Paid, string InvoiceReference);
 public sealed class LedgerValidationException(string message) : Exception(message);
 public sealed class IdempotencyConflictException(string message) : Exception(message);
+
+public static class InvoiceReferences {
+    public static void Validate(string? reference) {
+        if (string.IsNullOrWhiteSpace(reference))
+            throw new LedgerValidationException(
+                "Invoice reference is required.");
+
+        if (!string.Equals(
+                reference, reference.Trim(), StringComparison.Ordinal))
+            throw new LedgerValidationException(
+                "Invoice reference must not have surrounding whitespace.");
+
+        if (reference.StartsWith("legacy:", StringComparison.Ordinal))
+            throw new LedgerValidationException(
+                "The legacy: invoice reference prefix is reserved.");
+    }
+}
 
 public sealed class InMemoryLedger
 {
@@ -20,7 +37,8 @@ public sealed class InMemoryLedger
     private readonly Dictionary<Guid, long> _balances = [];
     private readonly Dictionary<(Guid RunId, string Key), LedgerJournal> _journalsByKey = [];
     private readonly List<LedgerJournal> _journals = [];
-    private readonly Dictionary<Guid, (Guid RunId, Guid MerchantAccountId, long AmountSen, bool Paid)> _obligations = [];
+    private readonly Dictionary<Guid, (Guid RunId, Guid MerchantAccountId, long AmountSen, bool Paid, string InvoiceReference)> _obligations = [];
+    private readonly Dictionary<(Guid RunId, string InvoiceReference), Guid> _obligationIdsByInvoice = [];
 
     public Guid CreateAccount(Guid runId, AccountKind kind)
     {
@@ -112,25 +130,78 @@ public sealed class InMemoryLedger
         lock (_gate) { EnsureAccountKind(runId, cashAccountId, AccountKind.AgentCash); EnsureAccountKind(runId, merchantAccountId, AccountKind.Merchant); return Commit(request); }
     }
 
-    public ObligationResult CreateObligation(Guid runId, Guid merchantAccountId, long amountSen)
+    public ObligationResult CreateObligation(
+        Guid runId,
+        Guid merchantAccountId,
+        long amountSen,
+        string invoiceReference)
     {
-        if (runId == Guid.Empty || amountSen <= 0) throw new LedgerValidationException("Run ID and positive obligation amount are required.");
+        if (runId == Guid.Empty || amountSen <= 0)
+            throw new LedgerValidationException(
+                "Run ID and positive obligation amount are required.");
+
+        InvoiceReferences.Validate(invoiceReference);
+
         lock (_gate)
         {
-            EnsureAccountKind(runId, merchantAccountId, AccountKind.Merchant);
+            var invoiceKey = (runId, invoiceReference);
+
+            if (_obligationIdsByInvoice.TryGetValue(
+                    invoiceKey, out var existingId))
+            {
+                var existing = _obligations[existingId];
+
+                if (existing.MerchantAccountId != merchantAccountId
+                    || existing.AmountSen != amountSen)
+                {
+                    throw new IdempotencyConflictException(
+                        "Invoice reference was previously used with a different payload.");
+                }
+
+                return GetObligation(runId, existingId);
+            }
+
+            EnsureAccountKind(
+                runId, merchantAccountId, AccountKind.Merchant);
+
             var obligationId = Guid.NewGuid();
-            _obligations.Add(obligationId, (runId, merchantAccountId, amountSen, false));
-            return new ObligationResult(obligationId, merchantAccountId, amountSen, false);
+
+            _obligations.Add(
+                obligationId,
+                (runId, merchantAccountId, amountSen,
+                false, invoiceReference));
+
+            _obligationIdsByInvoice.Add(invoiceKey, obligationId);
+
+            return new ObligationResult(
+                obligationId,
+                merchantAccountId,
+                amountSen,
+                false,
+                invoiceReference);
         }
     }
 
-    public ObligationResult GetObligation(Guid runId, Guid obligationId)
+    public ObligationResult GetObligation(
+        Guid runId,
+        Guid obligationId)
     {
         lock (_gate)
         {
-            if (!_obligations.TryGetValue(obligationId, out var obligation) || obligation.RunId != runId)
-                throw new LedgerValidationException("Obligation not found in this run.");
-            return new ObligationResult(obligationId, obligation.MerchantAccountId, obligation.AmountSen, obligation.Paid);
+            if (!_obligations.TryGetValue(
+                    obligationId, out var obligation)
+                || obligation.RunId != runId)
+            {
+                throw new LedgerValidationException(
+                    "Obligation not found in this run.");
+            }
+
+            return new ObligationResult(
+                obligationId,
+                obligation.MerchantAccountId,
+                obligation.AmountSen,
+                obligation.Paid,
+                obligation.InvoiceReference);
         }
     }
 
