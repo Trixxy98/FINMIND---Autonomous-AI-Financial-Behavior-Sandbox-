@@ -69,4 +69,49 @@ public sealed class RestrictedRoleTests {
         Assert.Equal(200, ledger.GetBalance(runId, merchantId));
         Assert.Equal(4, ledger.GetJournals(runId).Count);
     }
+
+    // Open one run, membuat transfer, simpanan dan bayaran bil, then compare setiap baki akaun dgn jumlah postingnya
+    [PostgresFact]
+    public void Api_balance_reconcile_to_committed_postings() {
+        var connectionString = Environment.GetEnvironmentVariable("FINMIND_API_TEST_DATABASE")!;
+
+        using var dataSource = NpgsqlDataSource.Create(connectionString);
+        var ledger = new PostgresLedger(dataSource);
+        var runId = Guid.NewGuid();
+
+        var cashId = ledger.OpenRun(runId, "open", 1_000, 300).CashAccountId;
+        var merchantId = ledger.CreateAccount(runId, AccountKind.Merchant);
+        var savingsId = ledger.CreateAccount(runId, AccountKind.AgentSavings);
+
+        ledger.Transfer(runId, "transfer", cashId, merchantId, 150);
+        ledger.MoveToSavings(runId, "savings", cashId, savingsId, 200);
+
+        var obligation = ledger.CreateObligation(
+            runId, merchantId, 100, "INV-RECONCILE-001");
+        ledger.PayObligation(
+            runId, "payment", cashId, obligation.ObligationId);
+
+        Assert.Throws<LedgerValidationException>(() =>
+            ledger.Transfer(runId, "over-limit", cashId, merchantId, 301));
+
+        var journals = ledger.GetJournals(runId);
+        Assert.Equal(4, journals.Count);
+
+        foreach (var journal in journals)
+            Assert.Equal(0, journal.Postings.Sum(posting => posting.AmountSen));
+
+        var totalsByAccount = journals
+            .SelectMany(journal => journal.Postings)
+            .GroupBy(posting => posting.AccountId)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Sum(posting => posting.AmountSen));
+
+        foreach (var (accountId, postingTotal) in totalsByAccount)
+            Assert.Equal(postingTotal, ledger.GetBalance(runId, accountId));
+
+        Assert.Equal(550, ledger.GetBalance(runId, cashId));
+        Assert.Equal(250, ledger.GetBalance(runId, merchantId));
+        Assert.Equal(200, ledger.GetBalance(runId, savingsId));
+    }
 }
