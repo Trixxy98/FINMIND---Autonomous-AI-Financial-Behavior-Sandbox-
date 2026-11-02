@@ -36,6 +36,7 @@ jobs:
 
     env:
       FINMIND_TEST_DATABASE: "Host=localhost;Port=5432;Database=finmind_test;Username=finmind;Password=ci-only-password"
+      FINMIND_API_TEST_DATABASE: "Host=localhost;Port=5432;Database=finmind_test;Username=finmind_api;Password=ci-only-api-password"
       DOTNET_CLI_TELEMETRY_OPTOUT: "1"
       DOTNET_NOLOGO: "1"
 
@@ -75,6 +76,14 @@ jobs:
               psql -v ON_ERROR_STOP=1 -U finmind -d finmind_test \
               < "$migration"
           done
+
+      - name: Configure restricted CI login
+        env: 
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: | 
+          docker exec "$POSTGRES_CONTAINER_ID" \
+          psql -v ON_ERROR_STOP=1 -U finmind -d finmind_test \
+          -c "ALTER ROLE finmind_api PASSWORD 'ci-only-api-password'"
 
       - name: Restore .NET dependencies
         run: dotnet restore apps/api/Finance.Tests/Finmind.Finance.Tests.csproj

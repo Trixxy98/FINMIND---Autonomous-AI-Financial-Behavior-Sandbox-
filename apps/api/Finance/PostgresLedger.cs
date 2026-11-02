@@ -464,7 +464,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         NpgsqlTransaction transaction, Guid runId, IReadOnlyList<PostingRequest> postings)
     {
         using var command = new NpgsqlCommand(
-            "SELECT id, kind FROM accounts WHERE run_id = @run_id AND id = ANY(@account_ids) ORDER BY id FOR UPDATE",
+            "SELECT id, kind FROM accounts WHERE run_id = @run_id AND id = ANY(@account_ids) ORDER BY id",
             connection, transaction);
         command.Parameters.AddWithValue("run_id", runId);
         command.Parameters.AddWithValue("account_ids", postings.Select(posting => posting.AccountId).Distinct().ToArray());
