@@ -1,6 +1,6 @@
 # FINMIND ADR 0003: Run-Scoped Invoice Identity
 
-- Status: Proposed
+- Status: Implemented for Phase 1 local API
 - Date: 31 October 2026
 - Scope: Prevent duplicate synthetic invoices becoming separately payable obligations
 
@@ -10,7 +10,7 @@ An existing obligation cannot be paid twice, but obligation creation
 currently generates a new ID for every request. Repeated delivery of
 one invoice can therefore create multiple payable obligations.
 
-## Proposed decision
+## Decision
 
 - Require an invoice reference when creating an obligation.
 - The trusted scenario/setup component assigns the reference.
