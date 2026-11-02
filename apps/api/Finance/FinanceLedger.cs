@@ -39,6 +39,7 @@ public sealed class InMemoryLedger
     private readonly List<LedgerJournal> _journals = [];
     private readonly Dictionary<Guid, (Guid RunId, Guid MerchantAccountId, long AmountSen, bool Paid, string InvoiceReference)> _obligations = [];
     private readonly Dictionary<(Guid RunId, string InvoiceReference), Guid> _obligationIdsByInvoice = [];
+    private readonly Dictionary<Guid, long> _runTransactionLimits = [];
 
     public Guid CreateAccount(Guid runId, AccountKind kind)
     {
@@ -46,50 +47,182 @@ public sealed class InMemoryLedger
         lock (_gate) { var id = Guid.NewGuid(); _accounts.Add(id, new Account(runId, kind)); _balances.Add(id, 0); return id; }
     }
 
-    public OpenRunResult OpenRun(Guid runId, string idempotencyKey, long openingBalanceSen)
+    public OpenRunResult OpenRun(
+        Guid runId,
+        string idempotencyKey,
+        long openingBalanceSen,
+        long transactionLimitSen)
     {
-        if (runId == Guid.Empty || string.IsNullOrWhiteSpace(idempotencyKey) || openingBalanceSen <= 0) throw new LedgerValidationException("Run ID, idempotency key, and positive opening balance are required.");
+        if (runId == Guid.Empty
+            || string.IsNullOrWhiteSpace(idempotencyKey)
+            || openingBalanceSen <= 0
+            || transactionLimitSen <= 0)
+        {
+            throw new LedgerValidationException(
+                "Run ID, idempotency key, positive opening balance, and positive transaction limit are required.");
+        }
+
         lock (_gate)
         {
-            var existing = _journals.FirstOrDefault(j => j.RunId == runId && j.Kind == JournalKind.OpeningFunding);
+            var hasPolicy = _runTransactionLimits.TryGetValue(
+                runId, out var configuredLimit);
+
+            if (hasPolicy && configuredLimit != transactionLimitSen)
+                throw new IdempotencyConflictException(
+                    "Run already has a different transaction policy.");
+
+            var existing = _journals.FirstOrDefault(
+                journal => journal.RunId == runId
+                    && journal.Kind == JournalKind.OpeningFunding);
+
             if (existing is not null)
             {
-                var cashPosting = existing.Postings.Single(p => _accounts[p.AccountId].Kind == AccountKind.AgentCash);
-                if (existing.IdempotencyKey != idempotencyKey || cashPosting.AmountSen != openingBalanceSen)
-                    throw new IdempotencyConflictException("Run has already been initialized with a different opening allocation.");
-                return new OpenRunResult(existing.JournalId, true, true, cashPosting.AccountId);
+                if (!hasPolicy)
+                    throw new LedgerValidationException(
+                        "Existing run has ledger activity but no transaction policy.");
+
+                var cashPosting = existing.Postings.Single(
+                    posting => _accounts[posting.AccountId].Kind
+                        == AccountKind.AgentCash);
+
+                if (existing.IdempotencyKey != idempotencyKey
+                    || cashPosting.AmountSen != openingBalanceSen)
+                {
+                    throw new IdempotencyConflictException(
+                        "Run has already been initialized with a different opening allocation.");
+                }
+
+                return new OpenRunResult(
+                    existing.JournalId, true, true, cashPosting.AccountId);
             }
-            var treasury = CreateAccount(runId, AccountKind.SimulatorTreasury);
-            var cash = CreateAccount(runId, AccountKind.AgentCash);
-            var result = Commit(new JournalRequest(runId, idempotencyKey, JournalKind.OpeningFunding, "authorized virtual opening allocation", [new(treasury, checked(-openingBalanceSen)), new(cash, openingBalanceSen)]));
-            return new OpenRunResult(result.JournalId, result.Committed, result.WasIdempotentReplay, cash);
+
+            if (_journals.Any(journal => journal.RunId == runId))
+                throw new LedgerValidationException(
+                    "Run already has ledger activity and cannot receive new opening funds.");
+
+            var treasuryId = CreateAccount(
+                runId, AccountKind.SimulatorTreasury);
+            var cashId = CreateAccount(runId, AccountKind.AgentCash);
+
+            _runTransactionLimits[runId] = transactionLimitSen;
+
+            CommitResult result;
+
+            try
+            {
+                result = Commit(new JournalRequest(
+                    runId,
+                    idempotencyKey,
+                    JournalKind.OpeningFunding,
+                    "authorized virtual opening allocation",
+                    [
+                        new(treasuryId, checked(-openingBalanceSen)),
+                        new(cashId, openingBalanceSen)
+                    ]));
+            }
+            catch
+            {
+                _accounts.Remove(treasuryId);
+                _accounts.Remove(cashId);
+                _balances.Remove(treasuryId);
+                _balances.Remove(cashId);
+
+                if (!hasPolicy)
+                    _runTransactionLimits.Remove(runId);
+
+                throw;
+            }
+
+            return new OpenRunResult(
+                result.JournalId,
+                result.Committed,
+                result.WasIdempotentReplay,
+                cashId);
         }
     }
 
     public CommitResult Commit(JournalRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+
         lock (_gate)
         {
             ValidateRequest(request);
+
+            if (!_runTransactionLimits.TryGetValue(
+                    request.RunId, out var transactionLimitSen))
+            {
+                throw new LedgerValidationException(
+                    "Run transaction policy is not configured.");
+            }
+
             var key = (request.RunId, request.IdempotencyKey);
             var fingerprint = Fingerprint(request);
+
             if (_journalsByKey.TryGetValue(key, out var existing))
             {
-                if (Fingerprint(existing) != fingerprint) throw new IdempotencyConflictException("Idempotency key was previously used with a different payload.");
+                if (Fingerprint(existing) != fingerprint)
+                    throw new IdempotencyConflictException(
+                        "Idempotency key was previously used with a different payload.");
+
                 return new CommitResult(existing.JournalId, true, true);
             }
-            if (request.Kind == JournalKind.OpeningFunding && _journals.Any(j => j.RunId == request.RunId && j.Kind == JournalKind.OpeningFunding))
-                throw new LedgerValidationException("Run already has an opening funding journal.");
-            var deltas = request.Postings.GroupBy(p => p.AccountId).ToDictionary(g => g.Key, g => g.Sum(p => p.AmountSen));
+
+            if (request.Kind == JournalKind.OpeningFunding)
+            {
+                if (_journals.Any(journal =>
+                        journal.RunId == request.RunId
+                        && journal.Kind == JournalKind.OpeningFunding))
+                {
+                    throw new LedgerValidationException(
+                        "Run already has an opening funding journal.");
+                }
+            }
+            else
+            {
+                var debit = request.Postings.Single(
+                    posting => posting.AmountSen < 0);
+
+                if (checked(-debit.AmountSen) > transactionLimitSen)
+                    throw new LedgerValidationException(
+                        "Run transaction limit exceeded.");
+            }
+
+            var deltas = request.Postings
+                .GroupBy(posting => posting.AccountId)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.Sum(posting => posting.AmountSen));
+
             foreach (var (accountId, delta) in deltas)
             {
                 var next = checked(_balances[accountId] + delta);
-                if (_accounts[accountId].Kind is AccountKind.AgentCash or AccountKind.AgentSavings && next < 0) throw new LedgerValidationException("Agent account cannot be overdrawn.");
+
+                if (_accounts[accountId].Kind
+                        is AccountKind.AgentCash or AccountKind.AgentSavings
+                    && next < 0)
+                {
+                    throw new LedgerValidationException(
+                        "Agent account cannot be overdrawn.");
+                }
             }
-            var journal = new LedgerJournal(Guid.NewGuid(), request.RunId, request.IdempotencyKey, request.Kind, request.Description, request.Postings.Select(p => new LedgerPosting(p.AccountId, p.AmountSen)).ToArray());
-            foreach (var (accountId, delta) in deltas) _balances[accountId] = checked(_balances[accountId] + delta);
-            _journals.Add(journal); _journalsByKey.Add(key, journal);
+
+            var journal = new LedgerJournal(
+                Guid.NewGuid(),
+                request.RunId,
+                request.IdempotencyKey,
+                request.Kind,
+                request.Description,
+                request.Postings.Select(posting =>
+                    new LedgerPosting(
+                        posting.AccountId, posting.AmountSen)).ToArray());
+
+            foreach (var (accountId, delta) in deltas)
+                _balances[accountId] = checked(_balances[accountId] + delta);
+
+            _journals.Add(journal);
+            _journalsByKey.Add(key, journal);
+
             return new CommitResult(journal.JournalId, true, false);
         }
     }
@@ -101,33 +234,69 @@ public sealed class InMemoryLedger
         catch (LedgerValidationException) { return false; }
     }
 
-    public CommitResult Transfer(Guid runId, string idempotencyKey, Guid sourceAccountId, Guid destinationAccountId, long amountSen, long transactionLimitSen)
+    public CommitResult Transfer(
+        Guid runId,
+        string idempotencyKey,
+        Guid sourceAccountId,
+        Guid destinationAccountId,
+        long amountSen)
     {
-        ValidateAmount(amountSen, transactionLimitSen);
-        var request = new JournalRequest(runId, idempotencyKey, JournalKind.Transfer, "virtual transfer", [new(sourceAccountId, checked(-amountSen)), new(destinationAccountId, amountSen)]);
-        lock (_gate)
-        {
-            EnsureAccountInRun(runId, sourceAccountId);
-            EnsureAccountInRun(runId, destinationAccountId);
-            if (_accounts[sourceAccountId].Kind is not (AccountKind.AgentCash or AccountKind.AgentSavings)) throw new LedgerValidationException("Transfer source must be an agent account.");
-            if (_accounts[destinationAccountId].Kind is not (AccountKind.Merchant or AccountKind.AgentCash or AccountKind.AgentSavings)) throw new LedgerValidationException("Transfer destination is not allowlisted.");
-            return Commit(request);
-        }
+        ValidateAmount(amountSen);
+
+        return Commit(new JournalRequest(
+            runId,
+            idempotencyKey,
+            JournalKind.Transfer,
+            "virtual transfer",
+            [
+                new(sourceAccountId, checked(-amountSen)),
+                new(destinationAccountId, amountSen)
+            ]));
     }
 
-    public CommitResult MoveToSavings(Guid runId, string idempotencyKey, Guid cashAccountId, Guid savingsAccountId, long amountSen, long transactionLimitSen)
+    public CommitResult MoveToSavings(
+        Guid runId,
+        string idempotencyKey,
+        Guid cashAccountId,
+        Guid savingsAccountId,
+        long amountSen)
     {
-        ValidateAmount(amountSen, transactionLimitSen);
-        var request = new JournalRequest(runId, idempotencyKey, JournalKind.SavingsMove, "move to savings", [new(cashAccountId, checked(-amountSen)), new(savingsAccountId, amountSen)]);
-        lock (_gate) { EnsureAccountKind(runId, cashAccountId, AccountKind.AgentCash); EnsureAccountKind(runId, savingsAccountId, AccountKind.AgentSavings); return Commit(request); }
+        ValidateAmount(amountSen);
+
+        return Commit(new JournalRequest(
+            runId,
+            idempotencyKey,
+            JournalKind.SavingsMove,
+            "move to savings",
+            [
+                new(cashAccountId, checked(-amountSen)),
+                new(savingsAccountId, amountSen)
+            ]));
     }
 
-    public CommitResult PayBill(Guid runId, string idempotencyKey, Guid cashAccountId, Guid merchantAccountId, long amountSen, long approvedObligationAmountSen, long transactionLimitSen)
+    public CommitResult PayBill(
+        Guid runId,
+        string idempotencyKey,
+        Guid cashAccountId,
+        Guid merchantAccountId,
+        long amountSen,
+        long approvedObligationAmountSen)
     {
-        ValidateAmount(amountSen, transactionLimitSen);
-        if (amountSen != approvedObligationAmountSen) throw new LedgerValidationException("Payment must match the server-approved obligation amount.");
-        var request = new JournalRequest(runId, idempotencyKey, JournalKind.BillPayment, "approved virtual bill payment", [new(cashAccountId, checked(-amountSen)), new(merchantAccountId, amountSen)]);
-        lock (_gate) { EnsureAccountKind(runId, cashAccountId, AccountKind.AgentCash); EnsureAccountKind(runId, merchantAccountId, AccountKind.Merchant); return Commit(request); }
+        ValidateAmount(amountSen);
+
+        if (amountSen != approvedObligationAmountSen)
+            throw new LedgerValidationException(
+                "Payment must match the server-approved obligation amount.");
+
+        return Commit(new JournalRequest(
+            runId,
+            idempotencyKey,
+            JournalKind.BillPayment,
+            "approved virtual bill payment",
+            [
+                new(cashAccountId, checked(-amountSen)),
+                new(merchantAccountId, amountSen)
+            ]));
     }
 
     public ObligationResult CreateObligation(
@@ -205,7 +374,7 @@ public sealed class InMemoryLedger
         }
     }
 
-    public CommitResult PayObligation(Guid runId, string idempotencyKey, Guid cashAccountId, Guid obligationId, long transactionLimitSen)
+    public CommitResult PayObligation(Guid runId, string idempotencyKey, Guid cashAccountId, Guid obligationId)
     {
         lock (_gate)
         {
@@ -223,7 +392,7 @@ public sealed class InMemoryLedger
                 return new CommitResult(previous.JournalId, true, true);
             }
             if (obligation.Paid) throw new LedgerValidationException("Obligation has already been paid.");
-            ValidateAmount(obligation.AmountSen, transactionLimitSen);
+            ValidateAmount(obligation.AmountSen);
             EnsureAccountKind(runId, cashAccountId, AccountKind.AgentCash);
             var request = new JournalRequest(runId, idempotencyKey, JournalKind.BillPayment, $"obligation:{obligationId:N}",
                 [new(cashAccountId, checked(-obligation.AmountSen)), new(obligation.MerchantAccountId, obligation.AmountSen)]);
@@ -275,10 +444,11 @@ public sealed class InMemoryLedger
 
         if (!valid) throw new LedgerValidationException("Posting account kinds are not permitted for this journal kind.");
     }
-    private static void ValidateAmount(long amountSen, long transactionLimitSen)
+    private static void ValidateAmount(long amountSen)
     {
-        if (amountSen <= 0) throw new LedgerValidationException("Amount must be positive.");
-        if (transactionLimitSen <= 0 || amountSen > transactionLimitSen) throw new LedgerValidationException("Transaction limit exceeded.");
+        if (amountSen <= 0)
+            throw new LedgerValidationException(
+                "Amount must be positive.");
     }
     private void EnsureAccountKind(Guid runId, Guid accountId, AccountKind expectedKind)
     {

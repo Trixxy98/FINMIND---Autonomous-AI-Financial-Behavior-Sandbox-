@@ -24,3 +24,19 @@ The policy is persisted and reproducible per run, so action attempts cannot sile
 ## Implementation
 
 `infra/db/migrations/002_run_transaction_policy.sql` adds the column and database trigger. `PostgresLedger` writes it during `OpenRun`, prevents later changes, and applies it to committed action journals. The API funding/run-initialization request accepts the limit; transfer, savings, and bill-payment DTOs do not. A legacy run without a policy may only be initialized if it has no prior journal activity; an existing active run must fail closed rather than accept a new policy or opening allocation.
+
+
+## In-memory ledger parity
+
+The in-memory ledger must also require a positive transaction cap during
+OpenRun and retain it for the lifetime of that ledger instance. Identical
+initialization retries return the original result; changed funding,
+idempotency key, or cap conflicts.
+
+Every new monetary commit requires stored run policy. Opening funding is
+exempt from the per-action cap; all other supported money movements are
+checked centrally in Commit, including calls through generic helpers.
+Action methods must not accept caller-supplied transaction limits.
+
+Runs with prior journal activity but no stored policy cannot be reopened
+to attach a policy. Tests must initialize funded runs through OpenRun.

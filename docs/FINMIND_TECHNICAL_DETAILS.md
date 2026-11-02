@@ -37,6 +37,14 @@ Untrusted content is data, never executable instruction. It cannot alter roles, 
 
 `infra/db/migrations/002_run_transaction_policy.sql` adds a positive per-run transaction cap. It is set during run initialization, immutable once configured, and read by the finance boundary for transfer, savings, and bill-payment commits; action requests cannot supply or raise the cap. Legacy runs with no stored cap fail closed for monetary actions.
 
+The in-memory ledger also requires a positive transaction cap during
+OpenRun. The cap cannot change after initialization. Commit requires
+stored run policy and enforces the cap for every supported action,
+including generic journal commits and TrySpend. Opening funding is
+exempt from the action cap. In-memory action methods no longer accept
+caller-supplied transaction limits; funded tests initialize through
+OpenRun.
+
 `infra/db/migrations/003_obligation_invoice_identity.sql` adds
 case-sensitive invoice references unique within each run. Existing
 obligations receive reserved `legacy:<UUID>` references without changing
