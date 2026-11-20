@@ -120,6 +120,10 @@ and `OBLIGATION_NOT_FOUND`, with the uniform error body. Malformed JSON
 that ASP.NET cannot bind is still rejected by the framework with its
 own 400 response before the handler runs.
 
+Catalog `finance-reasons/v2` (ADR-0006) adds `JOURNAL_NOT_FOUND`,
+`JOURNAL_ALREADY_REVERSED`, `JOURNAL_NOT_REVERSIBLE` (denied), and
+`UNSUPPORTED_INITIATOR_TYPE` (malformed). No v1 code changed meaning.
+
 ## Out of scope
 
 - Durable storage of decisions. Persisting proposals and decisions with

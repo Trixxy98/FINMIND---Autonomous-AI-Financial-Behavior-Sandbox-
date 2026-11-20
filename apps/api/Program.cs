@@ -36,7 +36,9 @@ IResult CommitResponse(CommitResult result) => Results.Ok(new
     reasonCode = (string?)null,
     result.Committed,
     result.JournalId,
-    result.WasIdempotentReplay
+    result.WasIdempotentReplay,
+    result.Effective,
+    result.ReversedByJournalId
 });
 
 app.MapGet("/health", (NpgsqlDataSource dataSource) =>
@@ -82,6 +84,8 @@ app.MapPost("/internal/runs/{runId:guid}/funding", (Guid runId, FundingRequest r
             result.Committed,
             result.JournalId,
             result.WasIdempotentReplay,
+            effective = true,
+            reversedByJournalId = (Guid?)null,
             cashAccountId = result.CashAccountId,
             balanceSen = ledger.GetBalance(runId, result.CashAccountId),
             currency = "MYR"
@@ -97,6 +101,11 @@ app.MapPost("/internal/runs/{runId:guid}/savings", (Guid runId, SavingsRequest r
 app.MapPost("/internal/runs/{runId:guid}/bill-payments", (Guid runId, BillPaymentRequest request, PostgresLedger ledger) =>
     Execute(() => CommitResponse(ledger.PayObligation(runId, request.IdempotencyKey, request.CashAccountId, request.ObligationId))));
 
+// ADR-0006: researcher-initiated full reversal. The initiator is set here, never read from the body.
+// Unauthenticated localhost-only scaffolding; the agent tool gateway must never expose this route.
+app.MapPost("/internal/runs/{runId:guid}/journals/{journalId:guid}/reversals", (Guid runId, Guid journalId, ReversalRequest request, PostgresLedger ledger) =>
+    Execute(() => CommitResponse(ledger.ReverseJournal(runId, request.IdempotencyKey, journalId, request.Reason, ReversalInitiator.Researcher))));
+
 // Obligation setup never moves money; success keeps returning the stored obligation.
 app.MapPost("/internal/runs/{runId:guid}/obligations", (Guid runId, CreateObligationRequest request, PostgresLedger ledger) =>
     Execute(() => Results.Ok(ledger.CreateObligation(runId, request.MerchantAccountId, request.AmountSen, request.InvoiceReference))));
@@ -111,4 +120,5 @@ internal sealed record FundingRequest(string IdempotencyKey, long AmountSen, lon
 internal sealed record TransferRequest(string IdempotencyKey, Guid SourceAccountId, Guid DestinationAccountId, long AmountSen);
 internal sealed record SavingsRequest(string IdempotencyKey, Guid CashAccountId, Guid SavingsAccountId, long AmountSen);
 internal sealed record BillPaymentRequest(string IdempotencyKey, Guid CashAccountId, Guid ObligationId);
+internal sealed record ReversalRequest(string IdempotencyKey, string Reason);
 internal sealed record CreateObligationRequest(Guid MerchantAccountId, long AmountSen, string InvoiceReference);

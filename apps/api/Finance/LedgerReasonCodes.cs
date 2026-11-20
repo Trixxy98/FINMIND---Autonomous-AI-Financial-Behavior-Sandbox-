@@ -26,12 +26,17 @@ public enum LedgerReasonCode
     RunPolicyConflict,
     ConcurrentStateChange,
     LedgerInvariantViolation,
-    InternalError
+    InternalError,
+    // finance-reasons/v2 (ADR-0006)
+    JournalNotFound,
+    JournalAlreadyReversed,
+    JournalNotReversible,
+    UnsupportedInitiatorType
 }
 
 public static class LedgerReasonCodes
 {
-    public const string CatalogVersion = "finance-reasons/v1";
+    public const string CatalogVersion = "finance-reasons/v2";
 
     public static LedgerOutcome OutcomeOf(LedgerReasonCode code) => code switch
     {
@@ -39,7 +44,8 @@ public static class LedgerReasonCodes
             or LedgerReasonCode.InvalidAmount
             or LedgerReasonCode.InvalidInvoiceReference
             or LedgerReasonCode.UnsupportedAccountKind
-            or LedgerReasonCode.SameSourceAndDestination => LedgerOutcome.Malformed,
+            or LedgerReasonCode.SameSourceAndDestination
+            or LedgerReasonCode.UnsupportedInitiatorType => LedgerOutcome.Malformed,
         LedgerReasonCode.RunNotFound
             or LedgerReasonCode.RunPolicyNotConfigured
             or LedgerReasonCode.RunAlreadyFunded
@@ -49,7 +55,10 @@ public static class LedgerReasonCodes
             or LedgerReasonCode.InsufficientFunds
             or LedgerReasonCode.ObligationNotFound
             or LedgerReasonCode.ObligationAlreadyPaid
-            or LedgerReasonCode.ObligationAmountMismatch => LedgerOutcome.Denied,
+            or LedgerReasonCode.ObligationAmountMismatch
+            or LedgerReasonCode.JournalNotFound
+            or LedgerReasonCode.JournalAlreadyReversed
+            or LedgerReasonCode.JournalNotReversible => LedgerOutcome.Denied,
         LedgerReasonCode.IdempotencyKeyConflict
             or LedgerReasonCode.InvoiceReferenceConflict
             or LedgerReasonCode.RunPolicyConflict => LedgerOutcome.Conflict,
@@ -82,6 +91,10 @@ public static class LedgerReasonCodes
         LedgerReasonCode.ConcurrentStateChange => "CONCURRENT_STATE_CHANGE",
         LedgerReasonCode.LedgerInvariantViolation => "LEDGER_INVARIANT_VIOLATION",
         LedgerReasonCode.InternalError => "INTERNAL_ERROR",
+        LedgerReasonCode.JournalNotFound => "JOURNAL_NOT_FOUND",
+        LedgerReasonCode.JournalAlreadyReversed => "JOURNAL_ALREADY_REVERSED",
+        LedgerReasonCode.JournalNotReversible => "JOURNAL_NOT_REVERSIBLE",
+        LedgerReasonCode.UnsupportedInitiatorType => "UNSUPPORTED_INITIATOR_TYPE",
         _ => "INTERNAL_ERROR"
     };
 

@@ -3,10 +3,15 @@ namespace Finmind.Api.Finance;
 public enum AccountKind { SimulatorTreasury, AgentCash, AgentSavings, Merchant }
 public enum JournalKind { OpeningFunding, BillPayment, Transfer, SavingsMove, Reversal }
 public sealed record PostingRequest(Guid AccountId, long AmountSen);
-public sealed record JournalRequest(Guid RunId, string IdempotencyKey, JournalKind Kind, string Description, IReadOnlyList<PostingRequest> Postings);
+// Server-side origin of a reversal (ADR-0006). Never taken from request bodies or model output.
+public enum ReversalInitiator { Researcher, ScenarioEngine }
+public sealed record JournalRequest(Guid RunId, string IdempotencyKey, JournalKind Kind, string Description, IReadOnlyList<PostingRequest> Postings, Guid? ObligationId = null);
 public sealed record LedgerPosting(Guid AccountId, long AmountSen);
-public sealed record LedgerJournal(Guid JournalId, Guid RunId, string IdempotencyKey, JournalKind Kind, string Description, IReadOnlyList<LedgerPosting> Postings);
-public sealed record CommitResult(Guid JournalId, bool Committed, bool WasIdempotentReplay);
+public sealed record LedgerJournal(
+    Guid JournalId, Guid RunId, string IdempotencyKey, JournalKind Kind, string Description, IReadOnlyList<LedgerPosting> Postings,
+    Guid? ObligationId = null, Guid? ReversesJournalId = null, string? ReversalReason = null, ReversalInitiator? Initiator = null);
+// Committed: the journal was durably recorded. Effective: it has not been reversed (ADR-0006).
+public sealed record CommitResult(Guid JournalId, bool Committed, bool WasIdempotentReplay, bool Effective = true, Guid? ReversedByJournalId = null);
 public sealed record OpenRunResult(Guid JournalId, bool Committed, bool WasIdempotentReplay, Guid CashAccountId);
 public sealed record ObligationResult(Guid ObligationId, Guid MerchantAccountId, long AmountSen, bool Paid, string InvoiceReference);
 public abstract class LedgerException(LedgerReasonCode reasonCode, string message) : Exception(message)
@@ -26,6 +31,7 @@ public interface IFinanceLedger
     ObligationResult CreateObligation(Guid runId, Guid merchantAccountId, long amountSen, string invoiceReference);
     ObligationResult GetObligation(Guid runId, Guid obligationId);
     CommitResult PayObligation(Guid runId, string idempotencyKey, Guid cashAccountId, Guid obligationId);
+    CommitResult ReverseJournal(Guid runId, string idempotencyKey, Guid originalJournalId, string reason, ReversalInitiator initiator);
     long GetBalance(Guid runId, Guid accountId);
     IReadOnlyList<LedgerJournal> GetJournals(Guid runId);
 }
@@ -68,6 +74,33 @@ internal static class LedgerRequestValidation
             throw new LedgerValidationException(LedgerReasonCode.LedgerInvariantViolation, "Journal postings must balance to zero.");
         if (request.Postings[0].AccountId == request.Postings[1].AccountId)
             throw new LedgerValidationException(LedgerReasonCode.SameSourceAndDestination, "Journal postings must use distinct accounts.");
+        if (request.Kind == JournalKind.Reversal)
+            throw new LedgerValidationException(LedgerReasonCode.LedgerInvariantViolation, "Reversals must use ReverseJournal.");
+        if ((request.Kind == JournalKind.BillPayment) != (request.ObligationId is not null))
+            throw new LedgerValidationException(LedgerReasonCode.LedgerInvariantViolation, "Bill payments, and only bill payments, must bind to an obligation.");
+    }
+
+    public static void ValidateReversal(Guid runId, string idempotencyKey, Guid originalJournalId, string reason, ReversalInitiator initiator)
+    {
+        if (runId == Guid.Empty || string.IsNullOrWhiteSpace(idempotencyKey) || originalJournalId == Guid.Empty || string.IsNullOrWhiteSpace(reason))
+            throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID, idempotency key, original journal ID, and reason are required.");
+        if (!Enum.IsDefined(initiator))
+            throw new LedgerValidationException(LedgerReasonCode.UnsupportedInitiatorType, "Unsupported reversal initiator.");
+    }
+
+    // ADR-0006: full reversal of agent money movements only.
+    public static void EnsureReversible(LedgerJournal original)
+    {
+        if (original.Kind is not (JournalKind.BillPayment or JournalKind.Transfer or JournalKind.SavingsMove))
+            throw new LedgerValidationException(LedgerReasonCode.JournalNotReversible, $"{original.Kind} journals cannot be reversed.");
+        if (original.Kind == JournalKind.BillPayment && original.ObligationId is null)
+            throw new LedgerValidationException(LedgerReasonCode.JournalNotReversible, "Legacy bill payments without an obligation link cannot be reversed.");
+    }
+
+    public static void EnsureReversalReplay(LedgerJournal existing, Guid originalJournalId, string reason)
+    {
+        if (existing.Kind != JournalKind.Reversal || existing.ReversesJournalId != originalJournalId || existing.ReversalReason != reason)
+            throw new IdempotencyConflictException(LedgerReasonCode.IdempotencyKeyConflict, "Idempotency key was previously used with a different payload.");
     }
 
     public static void ValidateAccountKinds(JournalKind kind, AccountKind debitKind, AccountKind creditKind)
@@ -109,7 +142,9 @@ public sealed class InMemoryLedger : IFinanceLedger
     private readonly Dictionary<Guid, long> _balances = [];
     private readonly Dictionary<(Guid RunId, string Key), LedgerJournal> _journalsByKey = [];
     private readonly List<LedgerJournal> _journals = [];
-    private readonly Dictionary<Guid, (Guid RunId, Guid MerchantAccountId, long AmountSen, bool Paid, string InvoiceReference)> _obligations = [];
+    private readonly Dictionary<Guid, (Guid RunId, Guid MerchantAccountId, long AmountSen, bool Paid, string InvoiceReference, Guid? PaidEntryId)> _obligations = [];
+    private readonly Dictionary<Guid, LedgerJournal> _journalsById = [];
+    private readonly Dictionary<Guid, Guid> _reversalIdsByOriginal = [];
     private readonly Dictionary<(Guid RunId, string InvoiceReference), Guid> _obligationIdsByInvoice = [];
     private readonly Dictionary<Guid, long> _runTransactionLimits = [];
 
@@ -246,7 +281,7 @@ public sealed class InMemoryLedger : IFinanceLedger
                         LedgerReasonCode.IdempotencyKeyConflict,
                         "Idempotency key was previously used with a different payload.");
 
-                return new CommitResult(existing.JournalId, true, true);
+                return ReplayResult(existing);
             }
 
             ValidateAccountsAndShape(request);
@@ -301,13 +336,13 @@ public sealed class InMemoryLedger : IFinanceLedger
                 request.Description,
                 request.Postings.Select(posting =>
                     new LedgerPosting(
-                        posting.AccountId, posting.AmountSen)).ToArray());
+                        posting.AccountId, posting.AmountSen)).ToArray(),
+                request.ObligationId);
 
             foreach (var (accountId, delta) in deltas)
                 _balances[accountId] = checked(_balances[accountId] + delta);
 
-            _journals.Add(journal);
-            _journalsByKey.Add(key, journal);
+            Append(journal);
 
             return new CommitResult(journal.JournalId, true, false);
         }
@@ -360,31 +395,6 @@ public sealed class InMemoryLedger : IFinanceLedger
             ]));
     }
 
-    public CommitResult PayBill(
-        Guid runId,
-        string idempotencyKey,
-        Guid cashAccountId,
-        Guid merchantAccountId,
-        long amountSen,
-        long approvedObligationAmountSen)
-    {
-        ValidateAmount(amountSen);
-
-        if (amountSen != approvedObligationAmountSen)
-            throw new LedgerValidationException(
-                LedgerReasonCode.ObligationAmountMismatch,
-                "Payment must match the server-approved obligation amount.");
-
-        return Commit(new JournalRequest(
-            runId,
-            idempotencyKey,
-            JournalKind.BillPayment,
-            "approved virtual bill payment",
-            [
-                new(cashAccountId, checked(-amountSen)),
-                new(merchantAccountId, amountSen)
-            ]));
-    }
 
     public ObligationResult CreateObligation(
         Guid runId,
@@ -422,7 +432,7 @@ public sealed class InMemoryLedger : IFinanceLedger
             _obligations.Add(
                 obligationId,
                 (runId, merchantAccountId, amountSen,
-                false, invoiceReference));
+                false, invoiceReference, null));
 
             _obligationIdsByInvoice.Add(invoiceKey, obligationId);
 
@@ -467,7 +477,7 @@ public sealed class InMemoryLedger : IFinanceLedger
                 throw new LedgerValidationException(LedgerReasonCode.ObligationNotFound, "Obligation not found in this run.");
 
             var request = new JournalRequest(runId, idempotencyKey, JournalKind.BillPayment, $"obligation:{obligationId:N}",
-                [new(cashAccountId, checked(-obligation.AmountSen)), new(obligation.MerchantAccountId, obligation.AmountSen)]);
+                [new(cashAccountId, checked(-obligation.AmountSen)), new(obligation.MerchantAccountId, obligation.AmountSen)], obligationId);
             ValidateRequestFields(request);
 
             // Permit retries of a payment already committed with this key, but never
@@ -477,14 +487,76 @@ public sealed class InMemoryLedger : IFinanceLedger
             {
                 if (Fingerprint(previous) != Fingerprint(request))
                     throw new IdempotencyConflictException(LedgerReasonCode.IdempotencyKeyConflict, "Idempotency key was previously used with a different payload.");
-                return new CommitResult(previous.JournalId, true, true);
+                return ReplayResult(previous);
             }
             if (obligation.Paid) throw new LedgerValidationException(LedgerReasonCode.ObligationAlreadyPaid, "Obligation has already been paid.");
             // Account ownership and kind are checked by Commit, matching PostgresLedger.
             var result = Commit(request);
-            _obligations[obligationId] = obligation with { Paid = true };
+            _obligations[obligationId] = obligation with { Paid = true, PaidEntryId = result.JournalId };
             return result;
         }
+    }
+
+    // ADR-0006 full reversal. Check order mirrors PostgresLedger.ReverseJournal.
+    public CommitResult ReverseJournal(Guid runId, string idempotencyKey, Guid originalJournalId, string reason, ReversalInitiator initiator)
+    {
+        LedgerRequestValidation.ValidateReversal(runId, idempotencyKey, originalJournalId, reason, initiator);
+
+        lock (_gate)
+        {
+            if (_journalsByKey.TryGetValue((runId, idempotencyKey), out var existing))
+            {
+                LedgerRequestValidation.EnsureReversalReplay(existing, originalJournalId, reason);
+                return ReplayResult(existing);
+            }
+
+            if (!_journalsById.TryGetValue(originalJournalId, out var original) || original.RunId != runId)
+                throw new LedgerValidationException(LedgerReasonCode.JournalNotFound, "Journal not found in this run.");
+            LedgerRequestValidation.EnsureReversible(original);
+            if (_reversalIdsByOriginal.ContainsKey(originalJournalId))
+                throw new LedgerValidationException(LedgerReasonCode.JournalAlreadyReversed, "Journal has already been reversed.");
+
+            if (original.ObligationId is { } obligationId)
+            {
+                var obligation = _obligations[obligationId];
+                if (!obligation.Paid || obligation.PaidEntryId != originalJournalId)
+                    throw new LedgerValidationException(LedgerReasonCode.LedgerInvariantViolation, "Obligation does not reference the payment being reversed.");
+            }
+
+            var postings = original.Postings.Select(posting => new LedgerPosting(posting.AccountId, checked(-posting.AmountSen))).ToArray();
+            foreach (var posting in postings)
+            {
+                if (_accounts[posting.AccountId].Kind is AccountKind.AgentCash or AccountKind.AgentSavings
+                    && checked(_balances[posting.AccountId] + posting.AmountSen) < 0)
+                    throw new LedgerValidationException(LedgerReasonCode.InsufficientFunds, "Agent account cannot be overdrawn.");
+            }
+
+            var reversal = new LedgerJournal(Guid.NewGuid(), runId, idempotencyKey, JournalKind.Reversal,
+                $"reversal:{originalJournalId:N}", postings, original.ObligationId, originalJournalId, reason, initiator);
+            foreach (var posting in postings)
+                _balances[posting.AccountId] = checked(_balances[posting.AccountId] + posting.AmountSen);
+            Append(reversal);
+
+            if (original.ObligationId is { } paidObligationId)
+                _obligations[paidObligationId] = _obligations[paidObligationId] with { Paid = false, PaidEntryId = null };
+
+            return new CommitResult(reversal.JournalId, true, false);
+        }
+    }
+
+    private void Append(LedgerJournal journal)
+    {
+        _journals.Add(journal);
+        _journalsByKey.Add((journal.RunId, journal.IdempotencyKey), journal);
+        _journalsById.Add(journal.JournalId, journal);
+        if (journal.ReversesJournalId is { } originalId)
+            _reversalIdsByOriginal.Add(originalId, journal.JournalId);
+    }
+
+    private CommitResult ReplayResult(LedgerJournal journal)
+    {
+        Guid? reversedBy = _reversalIdsByOriginal.TryGetValue(journal.JournalId, out var reversalId) ? reversalId : null;
+        return new CommitResult(journal.JournalId, true, true, reversedBy is null, reversedBy);
     }
 
     public long GetBalance(Guid runId, Guid accountId)

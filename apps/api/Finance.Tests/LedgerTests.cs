@@ -208,7 +208,7 @@ public sealed class LedgerTests
     }
 
     [Fact]
-    public void Bill_payment_requires_server_approved_amount_and_merchant_account()
+    public void Bill_payment_uses_server_obligation_amount_and_merchant_payee()
     {
         var ledger = new InMemoryLedger();
         var run = Guid.NewGuid();
@@ -216,19 +216,18 @@ public sealed class LedgerTests
         var merchant = ledger.CreateAccount(run, AccountKind.Merchant);
         var savings = ledger.CreateAccount(run, AccountKind.AgentSavings);
 
-        Assert.Throws<LedgerValidationException>(() =>
-            ledger.PayBill(run, "wrong-amount", cash, merchant, 100, 120));
+        var wrongPayee = Assert.Throws<LedgerValidationException>(() =>
+            ledger.CreateObligation(run, savings, 120, "INV-WRONG-PAYEE"));
+        Assert.Equal(LedgerReasonCode.AccountKindNotPermitted, wrongPayee.ReasonCode);
 
-        Assert.Throws<LedgerValidationException>(() =>
-            ledger.PayBill(run, "wrong-payee", cash, savings, 120, 120));
-
-        var paid = ledger.PayBill(
-            run, "bill-1", cash, merchant, 120, 120);
+        var obligation = ledger.CreateObligation(run, merchant, 120, "INV-1");
+        var paid = ledger.PayObligation(run, "bill-1", cash, obligation.ObligationId);
 
         Assert.True(paid.Committed);
         Assert.Equal(180, ledger.GetBalance(run, cash));
         Assert.Equal(120, ledger.GetBalance(run, merchant));
         Assert.Equal(0, ledger.GetBalance(run, savings));
+        Assert.Equal(obligation.ObligationId, ledger.GetJournals(run).Last().ObligationId);
         Assert.Equal(2, ledger.GetJournals(run).Count);
     }
 
@@ -517,9 +516,6 @@ public sealed class LedgerTests
 
         Assert.Throws<LedgerValidationException>(() =>
             ledger.MoveToSavings(run, "savings", cash, savings, 101));
-
-        Assert.Throws<LedgerValidationException>(() =>
-            ledger.PayBill(run, "bill", cash, merchant, 101, 101));
 
         Assert.Throws<LedgerValidationException>(() =>
             ledger.PayObligation(

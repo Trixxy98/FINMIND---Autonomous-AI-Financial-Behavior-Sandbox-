@@ -60,6 +60,15 @@ including its reference. Conflicting details return HTTP 409, while
 ledger validation failures return HTTP 400. Creation never moves money.
 The endpoint remains unauthenticated localhost-only development scaffolding.
 
+`infra/db/migrations/005_journal_reversal.sql` adds append-only full
+reversal (ADR-0006). A `reversal` journal links to its original with
+`reverses_entry_id`; bill payments and their reversals carry
+`obligation_id`. Database triggers require exact negated postings, allow
+at most one reversal per journal, and keep obligation `paid` consistent
+with an unreversed payment. Reversing a bill payment returns the
+obligation to unpaid in the same transaction. The agent has no reversal
+tool.
+
 ### Commit procedure
 1. Authenticate trusted caller and resolve scoped run principal server-side.
 2. Validate schema, run state, tool grant, ownership, currency, amount, destination, limits, and idempotency.

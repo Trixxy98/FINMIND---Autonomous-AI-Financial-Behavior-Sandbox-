@@ -128,16 +128,6 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             "move to savings", [new(cashAccountId, checked(-amountSen)), new(savingsAccountId, amountSen)]));
     }
 
-    public CommitResult PayBill(Guid runId, string idempotencyKey, Guid cashAccountId,
-        Guid merchantAccountId, long amountSen, long approvedObligationAmountSen)
-    {
-        LedgerRequestValidation.ValidateAmount(amountSen);
-        if (amountSen != approvedObligationAmountSen)
-            throw new LedgerValidationException(LedgerReasonCode.ObligationAmountMismatch, "Payment must match the server-approved obligation amount.");
-        return Commit(new JournalRequest(runId, idempotencyKey, JournalKind.BillPayment,
-            "approved virtual bill payment", [new(cashAccountId, checked(-amountSen)), new(merchantAccountId, amountSen)]));
-    }
-
     public ObligationResult CreateObligation(
         Guid runId,
         Guid merchantAccountId,
@@ -299,15 +289,16 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
 
         var description = $"obligation:{obligationId:N}";
         var request = new JournalRequest(runId, idempotencyKey, JournalKind.BillPayment, description,
-            [new(cashAccountId, checked(-amountSen)), new(merchantAccountId, amountSen)]);
+            [new(cashAccountId, checked(-amountSen)), new(merchantAccountId, amountSen)], obligationId);
         ValidateRequestFields(request);
         var previous = LoadJournalByKey(connection, transaction, runId, idempotencyKey);
         if (previous is not null)
         {
             if (Fingerprint(previous) != Fingerprint(request))
                 throw new IdempotencyConflictException(LedgerReasonCode.IdempotencyKeyConflict, "Idempotency key was previously used with a different payload.");
+            var replay = ReplayResult(connection, transaction, previous);
             transaction.Commit();
-            return new CommitResult(previous.JournalId, true, true);
+            return replay;
         }
         if (isPaid) throw new LedgerValidationException(LedgerReasonCode.ObligationAlreadyPaid, "Obligation has already been paid.");
 
@@ -323,43 +314,80 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         return result;
     }
 
+    // ADR-0006: append-only full reversal; obligation returns to UNPAID in the same transaction.
+    // Insert order matters: the obligation guard trigger requires the reversal journal to exist first.
+    public CommitResult ReverseJournal(Guid runId, string idempotencyKey, Guid originalJournalId, string reason, ReversalInitiator initiator)
+    {
+        LedgerRequestValidation.ValidateReversal(runId, idempotencyKey, originalJournalId, reason, initiator);
+
+        using var connection = dataSource.OpenConnection();
+        using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+        LockExistingRun(connection, transaction, runId);
+
+        var existing = LoadJournalByKey(connection, transaction, runId, idempotencyKey);
+        if (existing is not null)
+        {
+            LedgerRequestValidation.EnsureReversalReplay(existing, originalJournalId, reason);
+            var replay = ReplayResult(connection, transaction, existing);
+            transaction.Commit();
+            return replay;
+        }
+
+        var original = LoadJournalById(connection, transaction, runId, originalJournalId)
+            ?? throw new LedgerValidationException(LedgerReasonCode.JournalNotFound, "Journal not found in this run.");
+        LedgerRequestValidation.EnsureReversible(original);
+        if (FindReversalOf(connection, transaction, runId, originalJournalId) is not null)
+            throw new LedgerValidationException(LedgerReasonCode.JournalAlreadyReversed, "Journal has already been reversed.");
+
+        if (original.ObligationId is { } obligationId)
+        {
+            using var lockObligation = new NpgsqlCommand(
+                "SELECT paid, paid_entry_id FROM obligations WHERE id = @id AND run_id = @run_id FOR UPDATE",
+                connection, transaction);
+            lockObligation.Parameters.AddWithValue("id", obligationId);
+            lockObligation.Parameters.AddWithValue("run_id", runId);
+            using var reader = lockObligation.ExecuteReader();
+            if (!reader.Read() || !reader.GetBoolean(0) || reader.IsDBNull(1) || reader.GetGuid(1) != originalJournalId)
+                throw new LedgerValidationException(LedgerReasonCode.LedgerInvariantViolation, "Obligation does not reference the payment being reversed.");
+        }
+
+        var postings = original.Postings
+            .Select(posting => new PostingRequest(posting.AccountId, checked(-posting.AmountSen))).ToArray();
+        var kinds = LoadAccountKinds(connection, transaction, runId, postings);
+        foreach (var posting in postings)
+        {
+            if (kinds[posting.AccountId] is AccountKind.AgentCash or AccountKind.AgentSavings
+                && checked(GetBalance(connection, transaction, runId, posting.AccountId) + posting.AmountSen) < 0)
+                throw new LedgerValidationException(LedgerReasonCode.InsufficientFunds, "Agent account cannot be overdrawn.");
+        }
+
+        var reversalId = Guid.NewGuid();
+        InsertJournal(connection, transaction, reversalId, runId, JournalKind.Reversal, idempotencyKey,
+            $"reversal:{originalJournalId:N}", original.ObligationId, originalJournalId, reason, initiator);
+        foreach (var posting in postings)
+            InsertPosting(connection, transaction, reversalId, runId, posting.AccountId, posting.AmountSen);
+
+        if (original.ObligationId is { } paidObligationId)
+        {
+            using var update = new NpgsqlCommand(
+                "UPDATE obligations SET paid = FALSE, paid_entry_id = NULL " +
+                "WHERE id = @id AND run_id = @run_id AND paid = TRUE AND paid_entry_id = @original_id",
+                connection, transaction);
+            update.Parameters.AddWithValue("id", paidObligationId);
+            update.Parameters.AddWithValue("run_id", runId);
+            update.Parameters.AddWithValue("original_id", originalJournalId);
+            if (update.ExecuteNonQuery() != 1)
+                throw new LedgerValidationException(LedgerReasonCode.ConcurrentStateChange, "Obligation payment state changed concurrently.");
+        }
+
+        transaction.Commit();
+        return new CommitResult(reversalId, true, false);
+    }
+
     public IReadOnlyList<LedgerJournal> GetJournals(Guid runId)
     {
         using var connection = dataSource.OpenConnection();
-        using var command = new NpgsqlCommand(
-            "SELECT e.id, e.kind, e.idempotency_key, e.description, p.account_id, p.signed_amount_sen " +
-            "FROM journal_entries e JOIN journal_postings p ON p.entry_id = e.id AND p.run_id = e.run_id " +
-            "WHERE e.run_id = @run_id ORDER BY e.created_at, e.id, p.id", connection);
-        command.Parameters.AddWithValue("run_id", runId);
-        using var reader = command.ExecuteReader();
-        var journals = new List<LedgerJournal>();
-        Guid? currentJournalId = null;
-        var currentKind = JournalKind.OpeningFunding;
-        var currentKey = string.Empty;
-        var currentDescription = string.Empty;
-        var postings = new List<LedgerPosting>();
-
-        while (reader.Read())
-        {
-            var journalId = reader.GetGuid(0);
-            if (currentJournalId != journalId)
-            {
-                if (currentJournalId.HasValue)
-                    journals.Add(new LedgerJournal(currentJournalId.Value, runId, currentKey, currentKind, currentDescription, postings));
-
-                currentJournalId = journalId;
-                currentKind = FromDatabaseValue<JournalKind>(reader.GetString(1));
-                currentKey = reader.GetString(2);
-                currentDescription = reader.GetString(3);
-                postings = [];
-            }
-
-            postings.Add(new LedgerPosting(reader.GetGuid(4), reader.GetInt64(5)));
-        }
-
-        if (currentJournalId.HasValue)
-            journals.Add(new LedgerJournal(currentJournalId.Value, runId, currentKey, currentKind, currentDescription, postings));
-        return journals;
+        return LoadJournals(connection, null, runId, string.Empty, _ => { });
     }
 
     public CommitResult Commit(JournalRequest request)
@@ -385,7 +413,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         {
             if (Fingerprint(existing) != Fingerprint(request))
                 throw new IdempotencyConflictException(LedgerReasonCode.IdempotencyKeyConflict, "Idempotency key was previously used with a different payload.");
-            return new CommitResult(existing.JournalId, true, true);
+            return ReplayResult(connection, transaction, existing);
         }
 
         var accountKinds = LoadAccountKinds(connection, transaction, request.RunId, request.Postings);
@@ -418,7 +446,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
 
         var journalId = Guid.NewGuid();
         InsertJournal(connection, transaction, journalId, request.RunId, request.Kind,
-            request.IdempotencyKey, request.Description);
+            request.IdempotencyKey, request.Description, request.ObligationId);
         foreach (var posting in request.Postings)
             InsertPosting(connection, transaction, journalId, request.RunId, posting.AccountId, posting.AmountSen);
         return new CommitResult(journalId, true, false);
@@ -488,25 +516,67 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
     }
 
     private static LedgerJournal? LoadJournalByKey(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid runId, string idempotencyKey)
+        Guid runId, string idempotencyKey) =>
+        LoadJournals(connection, transaction, runId, " AND e.idempotency_key = @key",
+            command => command.Parameters.AddWithValue("key", idempotencyKey)).SingleOrDefault();
+
+    private static LedgerJournal? LoadJournalById(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        Guid runId, Guid journalId) =>
+        LoadJournals(connection, transaction, runId, " AND e.id = @journal_id",
+            command => command.Parameters.AddWithValue("journal_id", journalId)).SingleOrDefault();
+
+    private static List<LedgerJournal> LoadJournals(NpgsqlConnection connection, NpgsqlTransaction? transaction,
+        Guid runId, string filter, Action<NpgsqlCommand> bind)
     {
         using var command = new NpgsqlCommand(
-            "SELECT e.id, e.kind, e.description, e.idempotency_key, p.account_id, p.signed_amount_sen " +
+            "SELECT e.id, e.kind, e.idempotency_key, e.description, e.obligation_id, e.reverses_entry_id, " +
+            "e.reversal_reason, e.initiator_type, p.account_id, p.signed_amount_sen " +
             "FROM journal_entries e JOIN journal_postings p ON p.entry_id = e.id AND p.run_id = e.run_id " +
-            "WHERE e.run_id = @run_id AND e.idempotency_key = @key ORDER BY p.id",
+            "WHERE e.run_id = @run_id" + filter + " ORDER BY e.created_at, e.id, p.id", connection, transaction);
+        command.Parameters.AddWithValue("run_id", runId);
+        bind(command);
+        using var reader = command.ExecuteReader();
+        var journals = new List<LedgerJournal>();
+        LedgerJournal? current = null;
+        var postings = new List<LedgerPosting>();
+
+        while (reader.Read())
+        {
+            var journalId = reader.GetGuid(0);
+            if (current?.JournalId != journalId)
+            {
+                if (current is not null) journals.Add(current with { Postings = postings });
+                postings = [];
+                current = new LedgerJournal(
+                    journalId, runId, reader.GetString(2), FromDatabaseValue<JournalKind>(reader.GetString(1)),
+                    reader.GetString(3), [],
+                    reader.IsDBNull(4) ? null : reader.GetGuid(4),
+                    reader.IsDBNull(5) ? null : reader.GetGuid(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : FromDatabaseValue<ReversalInitiator>(reader.GetString(7)));
+            }
+
+            postings.Add(new LedgerPosting(reader.GetGuid(8), reader.GetInt64(9)));
+        }
+
+        if (current is not null) journals.Add(current with { Postings = postings });
+        return journals;
+    }
+
+    private static Guid? FindReversalOf(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, Guid journalId)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT id FROM journal_entries WHERE run_id = @run_id AND reverses_entry_id = @journal_id",
             connection, transaction);
         command.Parameters.AddWithValue("run_id", runId);
-        command.Parameters.AddWithValue("key", idempotencyKey);
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return null;
+        command.Parameters.AddWithValue("journal_id", journalId);
+        return command.ExecuteScalar() as Guid?;
+    }
 
-        var journalId = reader.GetGuid(0);
-        var kind = FromDatabaseValue<JournalKind>(reader.GetString(1));
-        var description = reader.GetString(2);
-        var key = reader.GetString(3);
-        var postings = new List<LedgerPosting> { new(reader.GetGuid(4), reader.GetInt64(5)) };
-        while (reader.Read()) postings.Add(new LedgerPosting(reader.GetGuid(4), reader.GetInt64(5)));
-        return new LedgerJournal(journalId, runId, key, kind, description, postings);
+    private static CommitResult ReplayResult(NpgsqlConnection connection, NpgsqlTransaction transaction, LedgerJournal journal)
+    {
+        var reversedBy = FindReversalOf(connection, transaction, journal.RunId, journal.JournalId);
+        return new CommitResult(journal.JournalId, true, true, reversedBy is null, reversedBy);
     }
 
     private static string Fingerprint(JournalRequest request) => string.Join("|", request.Kind,
@@ -597,16 +667,24 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
     }
 
     private static void InsertJournal(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid journalId, Guid runId, JournalKind kind, string idempotencyKey, string description)
+        Guid journalId, Guid runId, JournalKind kind, string idempotencyKey, string description,
+        Guid? obligationId = null, Guid? reversesJournalId = null, string? reversalReason = null, ReversalInitiator? initiator = null)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO journal_entries (id, run_id, kind, idempotency_key, description) " +
-            "VALUES (@id, @run_id, @kind, @key, @description)", connection, transaction);
+            "INSERT INTO journal_entries (id, run_id, kind, idempotency_key, description, " +
+            "obligation_id, reverses_entry_id, reversal_reason, initiator_type) " +
+            "VALUES (@id, @run_id, @kind, @key, @description, @obligation_id, @reverses_entry_id, @reversal_reason, @initiator_type)",
+            connection, transaction);
         command.Parameters.AddWithValue("id", journalId);
         command.Parameters.AddWithValue("run_id", runId);
         command.Parameters.AddWithValue("kind", ToDatabaseValue(kind));
         command.Parameters.AddWithValue("key", idempotencyKey);
         command.Parameters.AddWithValue("description", description);
+        command.Parameters.AddWithValue("obligation_id", NpgsqlDbType.Uuid, (object?)obligationId ?? DBNull.Value);
+        command.Parameters.AddWithValue("reverses_entry_id", NpgsqlDbType.Uuid, (object?)reversesJournalId ?? DBNull.Value);
+        command.Parameters.AddWithValue("reversal_reason", NpgsqlDbType.Text, (object?)reversalReason ?? DBNull.Value);
+        command.Parameters.AddWithValue("initiator_type", NpgsqlDbType.Text,
+            initiator is { } value ? ToDatabaseValue(value) : DBNull.Value);
         command.ExecuteNonQuery();
     }
 
@@ -638,7 +716,15 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         JournalKind.Transfer => "transfer",
         JournalKind.SavingsMove => "savings_move",
         JournalKind.BillPayment => "bill_payment",
+        JournalKind.Reversal => "reversal",
         _ => throw new LedgerValidationException(LedgerReasonCode.LedgerInvariantViolation, "Unsupported journal kind.")
+    };
+
+    private static string ToDatabaseValue(ReversalInitiator initiator) => initiator switch
+    {
+        ReversalInitiator.Researcher => "researcher",
+        ReversalInitiator.ScenarioEngine => "scenario_engine",
+        _ => throw new LedgerValidationException(LedgerReasonCode.UnsupportedInitiatorType, "Unsupported reversal initiator.")
     };
 
     private static T FromDatabaseValue<T>(string value) where T : struct, Enum
