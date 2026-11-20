@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace Finmind.Api.Finance;
 
 public enum AccountKind { SimulatorTreasury, AgentCash, AgentSavings, Merchant }
@@ -34,6 +36,12 @@ public interface IFinanceLedger
     CommitResult ReverseJournal(Guid runId, string idempotencyKey, Guid originalJournalId, string reason, ReversalInitiator initiator);
     long GetBalance(Guid runId, Guid accountId);
     IReadOnlyList<LedgerJournal> GetJournals(Guid runId);
+    IReadOnlyList<RunEvent> GetEvents(Guid runId, long afterSequence, int limit);
+}
+
+public static class RunEventPaging
+{
+    public const int MaxLimit = 500;
 }
 
 public static class InvoiceReferences {
@@ -78,6 +86,19 @@ internal static class LedgerRequestValidation
             throw new LedgerValidationException(LedgerReasonCode.LedgerInvariantViolation, "Reversals must use ReverseJournal.");
         if ((request.Kind == JournalKind.BillPayment) != (request.ObligationId is not null))
             throw new LedgerValidationException(LedgerReasonCode.LedgerInvariantViolation, "Bill payments, and only bill payments, must bind to an obligation.");
+    }
+
+    // Checked arithmetic overflow is a malformed amount, recorded like any other rejection.
+    public static T TranslateOverflow<T>(Func<T> body)
+    {
+        try
+        {
+            return body();
+        }
+        catch (OverflowException)
+        {
+            throw new LedgerValidationException(LedgerReasonCode.InvalidAmount, "Amount exceeds supported range.");
+        }
     }
 
     public static void ValidateReversal(Guid runId, string idempotencyKey, Guid originalJournalId, string reason, ReversalInitiator initiator)
@@ -147,15 +168,34 @@ public sealed class InMemoryLedger : IFinanceLedger
     private readonly Dictionary<Guid, Guid> _reversalIdsByOriginal = [];
     private readonly Dictionary<(Guid RunId, string InvoiceReference), Guid> _obligationIdsByInvoice = [];
     private readonly Dictionary<Guid, long> _runTransactionLimits = [];
+    private readonly Dictionary<Guid, List<RunEvent>> _events = [];
+    private List<PendingEvent>? _pending;
 
-    public Guid CreateAccount(Guid runId, AccountKind kind)
+    public Guid CreateAccount(Guid runId, AccountKind kind) =>
+        Record(FinanceEvents.Operations.CreateAccount, runId, FinanceEvents.Request(("kind", kind)),
+            FinanceEvents.InternalApiSource, () => CreateAccountCore(runId, kind, FinanceEvents.Operations.CreateAccount));
+
+    private Guid CreateAccountCore(Guid runId, AccountKind kind, string operation)
     {
         if (runId == Guid.Empty) throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID is required.");
         if (!Enum.IsDefined(kind)) throw new LedgerValidationException(LedgerReasonCode.UnsupportedAccountKind, "Unsupported account kind.");
-        lock (_gate) { var id = Guid.NewGuid(); _accounts.Add(id, new Account(runId, kind)); _balances.Add(id, 0); return id; }
+        var id = Guid.NewGuid();
+        _accounts.Add(id, new Account(runId, kind));
+        _balances.Add(id, 0);
+        Emit(FinanceEvents.AccountCreated(operation, id, kind));
+        return id;
     }
 
     public OpenRunResult OpenRun(
+        Guid runId,
+        string idempotencyKey,
+        long openingBalanceSen,
+        long transactionLimitSen) =>
+        Record(FinanceEvents.Operations.OpenRun, runId,
+            FinanceEvents.Request(("idempotencyKey", idempotencyKey), ("openingBalanceSen", openingBalanceSen), ("transactionLimitSen", transactionLimitSen)),
+            FinanceEvents.InternalApiSource, () => OpenRunCore(runId, idempotencyKey, openingBalanceSen, transactionLimitSen));
+
+    private OpenRunResult OpenRunCore(
         Guid runId,
         string idempotencyKey,
         long openingBalanceSen,
@@ -204,6 +244,8 @@ public sealed class InMemoryLedger : IFinanceLedger
                         "Run has already been initialized with a different opening allocation.");
                 }
 
+                Emit(FinanceEvents.LedgerReplayed(FinanceEvents.Operations.OpenRun,
+                    new CommitResult(existing.JournalId, true, true), idempotencyKey));
                 return new OpenRunResult(
                     existing.JournalId, true, true, cashPosting.AccountId);
             }
@@ -213,9 +255,11 @@ public sealed class InMemoryLedger : IFinanceLedger
                     LedgerReasonCode.RunAlreadyFunded,
                     "Run already has ledger activity and cannot receive new opening funds.");
 
-            var treasuryId = CreateAccount(
-                runId, AccountKind.SimulatorTreasury);
-            var cashId = CreateAccount(runId, AccountKind.AgentCash);
+            if (!hasPolicy)
+                Emit(FinanceEvents.RunCreated(transactionLimitSen));
+            var treasuryId = CreateAccountCore(
+                runId, AccountKind.SimulatorTreasury, FinanceEvents.Operations.OpenRun);
+            var cashId = CreateAccountCore(runId, AccountKind.AgentCash, FinanceEvents.Operations.OpenRun);
 
             _runTransactionLimits[runId] = transactionLimitSen;
 
@@ -223,7 +267,7 @@ public sealed class InMemoryLedger : IFinanceLedger
 
             try
             {
-                result = Commit(new JournalRequest(
+                result = CommitCore(new JournalRequest(
                     runId,
                     idempotencyKey,
                     JournalKind.OpeningFunding,
@@ -231,7 +275,7 @@ public sealed class InMemoryLedger : IFinanceLedger
                     [
                         new(treasuryId, checked(-openingBalanceSen)),
                         new(cashId, openingBalanceSen)
-                    ]));
+                    ]), FinanceEvents.Operations.OpenRun);
             }
             catch
             {
@@ -257,8 +301,13 @@ public sealed class InMemoryLedger : IFinanceLedger
     public CommitResult Commit(JournalRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        return Record(FinanceEvents.Operations.Commit, request.RunId,
+            FinanceEvents.Request(("idempotencyKey", request.IdempotencyKey), ("kind", request.Kind)),
+            FinanceEvents.InternalApiSource, () => CommitCore(request, FinanceEvents.Operations.Commit));
+    }
 
-        lock (_gate)
+    private CommitResult CommitCore(JournalRequest request, string operation)
+    {
         {
             // Check order mirrors PostgresLedger so both return the same reason code.
             ValidateRequestFields(request);
@@ -281,7 +330,9 @@ public sealed class InMemoryLedger : IFinanceLedger
                         LedgerReasonCode.IdempotencyKeyConflict,
                         "Idempotency key was previously used with a different payload.");
 
-                return ReplayResult(existing);
+                var replay = ReplayResult(existing);
+                Emit(FinanceEvents.LedgerReplayed(operation, replay, request.IdempotencyKey));
+                return replay;
             }
 
             ValidateAccountsAndShape(request);
@@ -343,6 +394,7 @@ public sealed class InMemoryLedger : IFinanceLedger
                 _balances[accountId] = checked(_balances[accountId] + delta);
 
             Append(journal);
+            Emit(FinanceEvents.LedgerCommitted(operation, journal));
 
             return new CommitResult(journal.JournalId, true, false);
         }
@@ -360,51 +412,61 @@ public sealed class InMemoryLedger : IFinanceLedger
         string idempotencyKey,
         Guid sourceAccountId,
         Guid destinationAccountId,
-        long amountSen)
-    {
-        ValidateAmount(amountSen);
-
-        return Commit(new JournalRequest(
-            runId,
-            idempotencyKey,
-            JournalKind.Transfer,
-            "virtual transfer",
-            [
-                new(sourceAccountId, checked(-amountSen)),
-                new(destinationAccountId, amountSen)
-            ]));
-    }
+        long amountSen) =>
+        Record(FinanceEvents.Operations.Transfer, runId,
+            FinanceEvents.Request(("idempotencyKey", idempotencyKey), ("sourceAccountId", sourceAccountId),
+                ("destinationAccountId", destinationAccountId), ("amountSen", amountSen)),
+            FinanceEvents.InternalApiSource, () =>
+            {
+                ValidateAmount(amountSen);
+                return CommitCore(new JournalRequest(
+                    runId,
+                    idempotencyKey,
+                    JournalKind.Transfer,
+                    "virtual transfer",
+                    [
+                        new(sourceAccountId, checked(-amountSen)),
+                        new(destinationAccountId, amountSen)
+                    ]), FinanceEvents.Operations.Transfer);
+            });
 
     public CommitResult MoveToSavings(
         Guid runId,
         string idempotencyKey,
         Guid cashAccountId,
         Guid savingsAccountId,
-        long amountSen)
-    {
-        ValidateAmount(amountSen);
-
-        return Commit(new JournalRequest(
-            runId,
-            idempotencyKey,
-            JournalKind.SavingsMove,
-            "move to savings",
-            [
-                new(cashAccountId, checked(-amountSen)),
-                new(savingsAccountId, amountSen)
-            ]));
-    }
+        long amountSen) =>
+        Record(FinanceEvents.Operations.MoveToSavings, runId,
+            FinanceEvents.Request(("idempotencyKey", idempotencyKey), ("cashAccountId", cashAccountId),
+                ("savingsAccountId", savingsAccountId), ("amountSen", amountSen)),
+            FinanceEvents.InternalApiSource, () =>
+            {
+                ValidateAmount(amountSen);
+                return CommitCore(new JournalRequest(
+                    runId,
+                    idempotencyKey,
+                    JournalKind.SavingsMove,
+                    "move to savings",
+                    [
+                        new(cashAccountId, checked(-amountSen)),
+                        new(savingsAccountId, amountSen)
+                    ]), FinanceEvents.Operations.MoveToSavings);
+            });
 
 
     public ObligationResult CreateObligation(
         Guid runId,
         Guid merchantAccountId,
         long amountSen,
-        string invoiceReference)
+        string invoiceReference) =>
+        Record(FinanceEvents.Operations.CreateObligation, runId,
+            FinanceEvents.Request(("merchantAccountId", merchantAccountId), ("amountSen", amountSen), ("invoiceReference", invoiceReference)),
+            FinanceEvents.InternalApiSource, () => CreateObligationCore(runId, merchantAccountId, amountSen, invoiceReference));
+
+    private ObligationResult CreateObligationCore(Guid runId, Guid merchantAccountId, long amountSen, string invoiceReference)
     {
         ValidateObligationRequest(runId, merchantAccountId, amountSen, invoiceReference);
 
-        lock (_gate)
         {
             var invoiceKey = (runId, invoiceReference);
 
@@ -436,12 +498,14 @@ public sealed class InMemoryLedger : IFinanceLedger
 
             _obligationIdsByInvoice.Add(invoiceKey, obligationId);
 
-            return new ObligationResult(
+            var created = new ObligationResult(
                 obligationId,
                 merchantAccountId,
                 amountSen,
                 false,
                 invoiceReference);
+            Emit(FinanceEvents.ObligationCreated(created));
+            return created;
         }
     }
 
@@ -469,9 +533,13 @@ public sealed class InMemoryLedger : IFinanceLedger
         }
     }
 
-    public CommitResult PayObligation(Guid runId, string idempotencyKey, Guid cashAccountId, Guid obligationId)
+    public CommitResult PayObligation(Guid runId, string idempotencyKey, Guid cashAccountId, Guid obligationId) =>
+        Record(FinanceEvents.Operations.PayObligation, runId,
+            FinanceEvents.Request(("idempotencyKey", idempotencyKey), ("cashAccountId", cashAccountId), ("obligationId", obligationId)),
+            FinanceEvents.InternalApiSource, () => PayObligationCore(runId, idempotencyKey, cashAccountId, obligationId));
+
+    private CommitResult PayObligationCore(Guid runId, string idempotencyKey, Guid cashAccountId, Guid obligationId)
     {
-        lock (_gate)
         {
             if (!_obligations.TryGetValue(obligationId, out var obligation) || obligation.RunId != runId)
                 throw new LedgerValidationException(LedgerReasonCode.ObligationNotFound, "Obligation not found in this run.");
@@ -487,27 +555,36 @@ public sealed class InMemoryLedger : IFinanceLedger
             {
                 if (Fingerprint(previous) != Fingerprint(request))
                     throw new IdempotencyConflictException(LedgerReasonCode.IdempotencyKeyConflict, "Idempotency key was previously used with a different payload.");
-                return ReplayResult(previous);
+                var replay = ReplayResult(previous);
+                Emit(FinanceEvents.LedgerReplayed(FinanceEvents.Operations.PayObligation, replay, idempotencyKey));
+                return replay;
             }
             if (obligation.Paid) throw new LedgerValidationException(LedgerReasonCode.ObligationAlreadyPaid, "Obligation has already been paid.");
             // Account ownership and kind are checked by Commit, matching PostgresLedger.
-            var result = Commit(request);
+            var result = CommitCore(request, FinanceEvents.Operations.PayObligation);
             _obligations[obligationId] = obligation with { Paid = true, PaidEntryId = result.JournalId };
+            Emit(FinanceEvents.ObligationPaid(obligationId, result.JournalId, idempotencyKey));
             return result;
         }
     }
 
     // ADR-0006 full reversal. Check order mirrors PostgresLedger.ReverseJournal.
-    public CommitResult ReverseJournal(Guid runId, string idempotencyKey, Guid originalJournalId, string reason, ReversalInitiator initiator)
+    public CommitResult ReverseJournal(Guid runId, string idempotencyKey, Guid originalJournalId, string reason, ReversalInitiator initiator) =>
+        Record(FinanceEvents.Operations.ReverseJournal, runId,
+            FinanceEvents.Request(("idempotencyKey", idempotencyKey), ("originalJournalId", originalJournalId), ("reason", reason), ("initiator", initiator)),
+            FinanceEvents.SourceFor(initiator), () => ReverseJournalCore(runId, idempotencyKey, originalJournalId, reason, initiator));
+
+    private CommitResult ReverseJournalCore(Guid runId, string idempotencyKey, Guid originalJournalId, string reason, ReversalInitiator initiator)
     {
         LedgerRequestValidation.ValidateReversal(runId, idempotencyKey, originalJournalId, reason, initiator);
 
-        lock (_gate)
         {
             if (_journalsByKey.TryGetValue((runId, idempotencyKey), out var existing))
             {
                 LedgerRequestValidation.EnsureReversalReplay(existing, originalJournalId, reason);
-                return ReplayResult(existing);
+                var replay = ReplayResult(existing);
+                Emit(FinanceEvents.LedgerReplayed(FinanceEvents.Operations.ReverseJournal, replay, idempotencyKey, FinanceEvents.SourceFor(initiator)));
+                return replay;
             }
 
             if (!_journalsById.TryGetValue(originalJournalId, out var original) || original.RunId != runId)
@@ -540,7 +617,66 @@ public sealed class InMemoryLedger : IFinanceLedger
             if (original.ObligationId is { } paidObligationId)
                 _obligations[paidObligationId] = _obligations[paidObligationId] with { Paid = false, PaidEntryId = null };
 
+            Emit(FinanceEvents.LedgerCommitted(FinanceEvents.Operations.ReverseJournal, reversal, FinanceEvents.SourceFor(initiator)));
+            Emit(FinanceEvents.JournalReversed(reversal));
+            if (reversal.ObligationId is not null)
+                Emit(FinanceEvents.ObligationPaymentReversed(reversal));
             return new CommitResult(reversal.JournalId, true, false);
+        }
+    }
+
+    // ADR-0007: an operation's events are buffered and stored only if it succeeds; a rejection stores POLICY_DENIED instead.
+    private T Record<T>(string operation, Guid runId, JsonObject request, string source, Func<T> body)
+    {
+        lock (_gate)
+        {
+            if (_pending is not null) return body();
+            _pending = [];
+            try
+            {
+                var result = LedgerRequestValidation.TranslateOverflow(body);
+                foreach (var pending in _pending) StoreEvent(runId, pending);
+                return result;
+            }
+            catch (LedgerException exception)
+            {
+                if (FinanceEvents.IsRecordable(runId, exception))
+                    StoreEvent(runId, FinanceEvents.PolicyDenied(operation, exception, request, source));
+                throw;
+            }
+            catch (Exception)
+            {
+                StoreEvent(runId, FinanceEvents.FinanceError(operation, LedgerReasonCode.InternalError,
+                    request["idempotencyKey"]?.GetValue<string>(), source));
+                throw;
+            }
+            finally
+            {
+                _pending = null;
+            }
+        }
+    }
+
+    private void Emit(PendingEvent pending) =>
+        (_pending ?? throw new InvalidOperationException("Events can only be emitted inside a recorded operation.")).Add(pending);
+
+    // Events are kept only for runs this ledger has opened (ADR-0007 "Unrecordable requests").
+    private void StoreEvent(Guid runId, PendingEvent pending)
+    {
+        if (!_runTransactionLimits.ContainsKey(runId)) return;
+        if (!_events.TryGetValue(runId, out var events)) _events[runId] = events = [];
+        events.Add(new RunEvent(runId, events.Count + 1, pending.EventType, FinanceEvents.Version, DateTimeOffset.UtcNow,
+            pending.Source, pending.Operation, pending.Outcome, pending.ReasonCode, pending.IdempotencyKey,
+            pending.JournalId, pending.ObligationId, (JsonObject)pending.Payload.DeepClone(), null));
+    }
+
+    public IReadOnlyList<RunEvent> GetEvents(Guid runId, long afterSequence, int limit)
+    {
+        lock (_gate)
+        {
+            return _events.TryGetValue(runId, out var events)
+                ? events.Where(e => e.Sequence > afterSequence).Take(Math.Clamp(limit, 1, RunEventPaging.MaxLimit)).ToArray()
+                : [];
         }
     }
 

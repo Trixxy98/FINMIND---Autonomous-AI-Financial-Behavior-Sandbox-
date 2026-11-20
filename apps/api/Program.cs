@@ -113,6 +113,21 @@ app.MapPost("/internal/runs/{runId:guid}/obligations", (Guid runId, CreateObliga
 app.MapGet("/internal/runs/{runId:guid}/obligations/{obligationId:guid}", (Guid runId, Guid obligationId, PostgresLedger ledger) =>
     Execute(() => Results.Ok(ledger.GetObligation(runId, obligationId)), isRead: true));
 
+// ADR-0007: ordered, append-only finance events for one run, paged by sequence cursor.
+// afterSequence below 0 is treated as 0; limit is clamped to 1..500.
+app.MapGet("/internal/runs/{runId:guid}/events", (Guid runId, long? afterSequence, int? limit, PostgresLedger ledger) =>
+    Execute(() =>
+    {
+        var after = Math.Max(afterSequence ?? 0, 0);
+        var events = ledger.GetEvents(runId, after, Math.Clamp(limit ?? 100, 1, RunEventPaging.MaxLimit));
+        return Results.Ok(new
+        {
+            runId,
+            events,
+            nextAfterSequence = events.Count > 0 ? events[^1].Sequence : after
+        });
+    }, isRead: true));
+
 app.Run("http://127.0.0.1:5080");
 
 internal sealed record CreateAccountRequest(string Kind);

@@ -4,7 +4,7 @@ A local-first research sandbox for observing AI behavior with virtual funds only
 
 ## Current status
 
-Phase 0 scaffold is in place. Phase 1 has a PostgreSQL-backed C# ledger for the local API plus an in-memory ledger prototype for deterministic unit tests. The API connects with the restricted `finmind_api` database role (see `docs/decisions/ADR-0004-api-database-role.md`); migrations run as the owner role `finmind`. A server-stored per-run transaction cap is enforced. Every finance outcome has a stable status and reason code (see `docs/decisions/ADR-0005-policy-decisions-and-reason-codes.md`). Committed transfers, savings moves, and bill payments can be fully reversed by a researcher; reversing a bill payment returns its obligation to unpaid (see `docs/decisions/ADR-0006-reversal-aware-obligation-state.md`). Local internal API endpoints remain unauthenticated, and run lifecycle and a durable audit event stream (including persisted policy decisions) are not implemented. Do not expose the internal endpoints outside localhost. No model-provider integration or agent tool gateway exists yet.
+Phase 0 scaffold is in place. Phase 1 has a PostgreSQL-backed C# ledger for the local API plus an in-memory ledger prototype for deterministic unit tests. The API connects with the restricted `finmind_api` database role (see `docs/decisions/ADR-0004-api-database-role.md`); migrations run as the owner role `finmind`. A server-stored per-run transaction cap is enforced. Every finance outcome has a stable status and reason code (see `docs/decisions/ADR-0005-policy-decisions-and-reason-codes.md`). Committed transfers, savings moves, and bill payments can be fully reversed by a researcher; reversing a bill payment returns its obligation to unpaid (see `docs/decisions/ADR-0006-reversal-aware-obligation-state.md`). Every finance decision and state transition on an existing run, including denials, is recorded in an append-only, hash-linked per-run event log, readable at `GET /internal/runs/{runId}/events` (see `docs/decisions/ADR-0007-finance-audit-event-store.md`). Local internal API endpoints remain unauthenticated, and run lifecycle is not implemented. Do not expose the internal endpoints outside localhost. No model-provider integration or agent tool gateway exists yet.
 
 ## Prerequisites
 
@@ -24,7 +24,8 @@ Phase 0 scaffold is in place. Phase 1 has a PostgreSQL-backed C# ledger for the 
    `infra/db/migrations/002_run_transaction_policy.sql`,
    `infra/db/migrations/003_obligation_invoice_identity.sql`,
    `infra/db/migrations/004_api_database_role.sql`,
-   and `infra/db/migrations/005_journal_reversal.sql`.
+   `infra/db/migrations/005_journal_reversal.sql`,
+   and `infra/db/migrations/006_run_events.sql`.
    Then set the restricted API role password interactively (the role is cluster-wide, so do this once):
    `docker compose -f infra/compose.yaml exec postgres psql -U finmind -d finmind -c "\password finmind_api"`.
    Use the same value as `Password=` in `ConnectionStrings__Finmind` and `FINMIND_API_TEST_DATABASE` in `.env`.

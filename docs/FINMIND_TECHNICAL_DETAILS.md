@@ -69,6 +69,14 @@ with an unreversed payment. Reversing a bill payment returns the
 obligation to unpaid in the same transaction. The agent has no reversal
 tool.
 
+`infra/db/migrations/006_run_events.sql` adds the append-only `run_events`
+log (ADR-0007). Successful finance operations write their events in the
+same transaction as the ledger change; rejections are recorded as
+`POLICY_DENIED` in a separate event-only transaction. PostgreSQL assigns
+each event's per-run sequence and SHA-256 hash link;
+`finmind_verify_run_events(run_id)` detects a broken chain. Tool-call,
+model, and scenario events arrive with the Phase 2 runtime.
+
 ### Commit procedure
 1. Authenticate trusted caller and resolve scoped run principal server-side.
 2. Validate schema, run state, tool grant, ownership, currency, amount, destination, limits, and idempotency.
@@ -80,7 +88,7 @@ tool.
 
 ## 3. Policy decision contract
 
-Implementation status: ADR-0005 defines the outcome categories and reason code catalog (`finance-reasons/v1`) that both ledgers and the local API now return. Decisions are not yet persisted; durable decision records arrive with the audit event store.
+Implementation status: ADR-0005 defines the outcome categories and reason code catalog that both ledgers and the local API return. ADR-0007 persists every finance decision on an existing run in the `run_events` log.
 
 Every proposal receives a durable decision with a stable reason code. Minimum outcomes: allowed, denied, malformed, unsupported capability, duplicate/replayed, and internal error. A denial is not a financial commit. Do not infer intent from the reason code.
 

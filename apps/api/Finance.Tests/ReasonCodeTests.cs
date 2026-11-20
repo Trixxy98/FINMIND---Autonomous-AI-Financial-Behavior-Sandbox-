@@ -83,13 +83,34 @@ public sealed class ReasonCodeTests
     {
         var fixture = Setup(ledger);
         var before = Snapshot(ledger, fixture);
+        var eventsBefore = ledger.GetEvents(fixture.RunId, 0, RunEventPaging.MaxLimit).Count;
         var (act, expected) = Scenarios[scenario];
 
         var exception = Assert.ThrowsAny<LedgerException>(() => act(ledger, fixture));
 
         Assert.Equal(expected, exception.ReasonCode);
         Assert.Equal(before, Snapshot(ledger, fixture));
+
+        // ADR-0007: a rejection on the fixture run is recorded as exactly one POLICY_DENIED.
+        var newEvents = ledger.GetEvents(fixture.RunId, eventsBefore, RunEventPaging.MaxLimit);
+        if (NotRecordedOnFixtureRun.Contains(scenario))
+        {
+            Assert.Empty(newEvents);
+            return;
+        }
+
+        var denial = Assert.Single(newEvents);
+        Assert.Equal("POLICY_DENIED", denial.EventType);
+        Assert.Equal(LedgerReasonCodes.ToWireValue(expected), denial.ReasonCode);
+        Assert.Equal(LedgerReasonCodes.ToWireValue(exception.Outcome), denial.Outcome);
     }
+
+    // Reads, and requests aimed at an empty or not-yet-created run, are not recorded on the fixture run.
+    private static readonly HashSet<string> NotRecordedOnFixtureRun =
+    [
+        "open_run_zero_amount", "open_run_zero_limit", "open_run_missing_key",
+        "create_account_missing_run", "balance_other_run_account", "get_unknown_obligation"
+    ];
 
     private static string Snapshot(IFinanceLedger ledger, Fixture f) => string.Join("|",
         ledger.GetBalance(f.RunId, f.Cash),
