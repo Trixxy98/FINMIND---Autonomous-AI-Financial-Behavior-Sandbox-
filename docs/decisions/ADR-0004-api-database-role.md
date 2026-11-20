@@ -1,6 +1,6 @@
 # FINMIND ADR 0004: Restricted API Database Role
 
-- Status: Proposed
+- Status: Implemented for Phase 1 local API
 - Date: 2 November 2026
 - Scope: Phase 1 local PostgreSQL ledger access
 

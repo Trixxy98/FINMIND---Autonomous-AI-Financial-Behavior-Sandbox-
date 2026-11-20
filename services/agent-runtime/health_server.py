@@ -20,4 +20,4 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    HTTPServer(("0.0.0.0", 8090), HealthHandler).serve_forever()
+    HTTPServer(("127.0.0.1", 8090), HealthHandler).serve_forever()

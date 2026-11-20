@@ -4,18 +4,18 @@ using NpgsqlTypes;
 
 namespace Finmind.Api.Finance;
 
-public sealed class PostgresLedger(NpgsqlDataSource dataSource)
+public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
 {
     public Guid CreateAccount(Guid runId, AccountKind kind)
     {
-        if (runId == Guid.Empty) throw new ArgumentException("Run ID is required.", nameof(runId));
-        if (!Enum.IsDefined(kind)) throw new LedgerValidationException("Unsupported account kind.");
+        if (runId == Guid.Empty) throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID is required.");
+        if (!Enum.IsDefined(kind)) throw new LedgerValidationException(LedgerReasonCode.UnsupportedAccountKind, "Unsupported account kind.");
 
         using var connection = dataSource.OpenConnection();
         using var transaction = connection.BeginTransaction();
         LockExistingRun(connection, transaction, runId);
         if (GetRunTransactionLimit(connection, transaction, runId) is null)
-            throw new LedgerValidationException("Run transaction policy is not configured.");
+            throw new LedgerValidationException(LedgerReasonCode.RunPolicyNotConfigured, "Run transaction policy is not configured.");
 
         var accountId = Guid.NewGuid();
         InsertAccount(connection, transaction, runId, accountId, kind);
@@ -25,8 +25,10 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
 
     public OpenRunResult OpenRun(Guid runId, string idempotencyKey, long openingBalanceSen, long transactionLimitSen)
     {
-        if (runId == Guid.Empty || string.IsNullOrWhiteSpace(idempotencyKey) || openingBalanceSen <= 0 || transactionLimitSen <= 0)
-            throw new LedgerValidationException("Run ID, idempotency key, and positive opening balance and transaction limit are required.");
+        if (runId == Guid.Empty || string.IsNullOrWhiteSpace(idempotencyKey))
+            throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID and idempotency key are required.");
+        if (openingBalanceSen <= 0 || transactionLimitSen <= 0)
+            throw new LedgerValidationException(LedgerReasonCode.InvalidAmount, "Opening balance and transaction limit must be positive sen.");
 
         using var connection = dataSource.OpenConnection();
         using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
@@ -37,31 +39,31 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         if (configuredLimit is null)
         {
             if (HasAnyJournal(connection, transaction, runId))
-                throw new LedgerValidationException("Existing run has ledger activity but no transaction policy; create a new run.");
+                throw new LedgerValidationException(LedgerReasonCode.RunPolicyNotConfigured, "Existing run has ledger activity but no transaction policy; create a new run.");
             SetRunTransactionLimit(connection, transaction, runId, transactionLimitSen);
             configuredLimit = transactionLimitSen;
         }
         else if (configuredLimit.Value != transactionLimitSen)
         {
-            throw new IdempotencyConflictException("Run already has a different transaction policy.");
+            throw new IdempotencyConflictException(LedgerReasonCode.RunPolicyConflict, "Run already has a different transaction policy.");
         }
 
         var existingKey = FindJournalByKey(connection, transaction, runId, idempotencyKey);
         if (existingKey is not null && existingKey.Value != JournalKind.OpeningFunding)
-            throw new IdempotencyConflictException("Idempotency key was previously used for a different operation.");
+            throw new IdempotencyConflictException(LedgerReasonCode.IdempotencyKeyConflict, "Idempotency key was previously used for a different operation.");
 
         var existingOpening = FindOpening(connection, transaction, runId);
         if (existingOpening is not null)
         {
             if (existingOpening.Value.IdempotencyKey != idempotencyKey || existingOpening.Value.AmountSen != openingBalanceSen)
-                throw new IdempotencyConflictException("Run has already been initialized with a different opening allocation.");
+                throw new IdempotencyConflictException(LedgerReasonCode.RunPolicyConflict, "Run has already been initialized with a different opening allocation.");
 
             transaction.Commit();
             return new OpenRunResult(existingOpening.Value.JournalId, true, true, existingOpening.Value.CashAccountId);
         }
 
         if (HasAnyJournal(connection, transaction, runId))
-            throw new LedgerValidationException("Run already has ledger activity and cannot receive new opening funds.");
+            throw new LedgerValidationException(LedgerReasonCode.RunAlreadyFunded, "Run already has ledger activity and cannot receive new opening funds.");
 
         var journalId = Guid.NewGuid();
         var treasuryId = Guid.NewGuid();
@@ -90,14 +92,14 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         command.Parameters.AddWithValue("account_id", accountId);
         command.Parameters.AddWithValue("run_id", runId);
         var result = command.ExecuteScalar();
-        if (result is null) throw new LedgerValidationException("Account is not in this run.");
+        if (result is null) throw new LedgerValidationException(LedgerReasonCode.AccountNotInRun, "Account is not in this run.");
         return (long)result;
     }
 
     public CommitResult Transfer(Guid runId, string idempotencyKey, Guid sourceAccountId,
         Guid destinationAccountId, long amountSen)
     {
-        if (amountSen <= 0) throw new LedgerValidationException("Amount must be positive.");
+        LedgerRequestValidation.ValidateAmount(amountSen);
         return Commit(new JournalRequest(runId, idempotencyKey, JournalKind.Transfer,
             "virtual transfer", [new(sourceAccountId, checked(-amountSen)), new(destinationAccountId, amountSen)]));
     }
@@ -121,7 +123,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
     public CommitResult MoveToSavings(Guid runId, string idempotencyKey, Guid cashAccountId,
         Guid savingsAccountId, long amountSen)
     {
-        if (amountSen <= 0) throw new LedgerValidationException("Amount must be positive.");
+        LedgerRequestValidation.ValidateAmount(amountSen);
         return Commit(new JournalRequest(runId, idempotencyKey, JournalKind.SavingsMove,
             "move to savings", [new(cashAccountId, checked(-amountSen)), new(savingsAccountId, amountSen)]));
     }
@@ -129,9 +131,9 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
     public CommitResult PayBill(Guid runId, string idempotencyKey, Guid cashAccountId,
         Guid merchantAccountId, long amountSen, long approvedObligationAmountSen)
     {
-        if (amountSen <= 0) throw new LedgerValidationException("Amount must be positive.");
+        LedgerRequestValidation.ValidateAmount(amountSen);
         if (amountSen != approvedObligationAmountSen)
-            throw new LedgerValidationException("Payment must match the server-approved obligation amount.");
+            throw new LedgerValidationException(LedgerReasonCode.ObligationAmountMismatch, "Payment must match the server-approved obligation amount.");
         return Commit(new JournalRequest(runId, idempotencyKey, JournalKind.BillPayment,
             "approved virtual bill payment", [new(cashAccountId, checked(-amountSen)), new(merchantAccountId, amountSen)]));
     }
@@ -142,11 +144,8 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         long amountSen,
         string invoiceReference)
     {
-        if (runId == Guid.Empty || amountSen <= 0)
-            throw new LedgerValidationException(
-                "Run ID and positive obligation amount are required.");
-
-        InvoiceReferences.Validate(invoiceReference);
+        LedgerRequestValidation.ValidateObligation(
+            runId, merchantAccountId, amountSen, invoiceReference);
 
         using var connection = dataSource.OpenConnection();
         using var transaction = connection.BeginTransaction(
@@ -156,6 +155,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
 
         if (GetRunTransactionLimit(connection, transaction, runId) is null)
             throw new LedgerValidationException(
+                LedgerReasonCode.RunPolicyNotConfigured,
                 "Run transaction policy is not configured.");
 
         using (var existingCommand = new NpgsqlCommand(
@@ -189,6 +189,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
                     || existing.AmountSen != amountSen)
                 {
                     throw new IdempotencyConflictException(
+                        LedgerReasonCode.InvoiceReferenceConflict,
                         "Invoice reference was previously used with a different payload.");
                 }
 
@@ -203,12 +204,15 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
             runId,
             [new PostingRequest(merchantAccountId, 1)]);
 
-        if (kinds.Count != 1
-            || kinds[merchantAccountId] != AccountKind.Merchant)
-        {
+        if (kinds.Count != 1)
             throw new LedgerValidationException(
+                LedgerReasonCode.AccountNotInRun,
+                "Account is not in this run.");
+
+        if (kinds[merchantAccountId] != AccountKind.Merchant)
+            throw new LedgerValidationException(
+                LedgerReasonCode.AccountKindNotPermitted,
                 "Obligation payee must be a merchant in this run.");
-        }
 
         var obligationId = Guid.NewGuid();
 
@@ -263,6 +267,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
 
         if (!reader.Read())
             throw new LedgerValidationException(
+                LedgerReasonCode.ObligationNotFound,
                 "Obligation not found in this run.");
 
         return new ObligationResult(
@@ -286,7 +291,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         obligationCommand.Parameters.AddWithValue("id", obligationId);
         obligationCommand.Parameters.AddWithValue("run_id", runId);
         using var reader = obligationCommand.ExecuteReader();
-        if (!reader.Read()) throw new LedgerValidationException("Obligation not found in this run.");
+        if (!reader.Read()) throw new LedgerValidationException(LedgerReasonCode.ObligationNotFound, "Obligation not found in this run.");
         var merchantAccountId = reader.GetGuid(0);
         var amountSen = reader.GetInt64(1);
         var isPaid = reader.GetBoolean(2);
@@ -300,11 +305,11 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         if (previous is not null)
         {
             if (Fingerprint(previous) != Fingerprint(request))
-                throw new IdempotencyConflictException("Idempotency key was previously used with a different payload.");
+                throw new IdempotencyConflictException(LedgerReasonCode.IdempotencyKeyConflict, "Idempotency key was previously used with a different payload.");
             transaction.Commit();
             return new CommitResult(previous.JournalId, true, true);
         }
-        if (isPaid) throw new LedgerValidationException("Obligation has already been paid.");
+        if (isPaid) throw new LedgerValidationException(LedgerReasonCode.ObligationAlreadyPaid, "Obligation has already been paid.");
 
         var result = CommitWithinTransaction(connection, transaction, request);
         using var update = new NpgsqlCommand(
@@ -313,7 +318,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         update.Parameters.AddWithValue("entry_id", result.JournalId);
         update.Parameters.AddWithValue("id", obligationId);
         update.Parameters.AddWithValue("run_id", runId);
-        if (update.ExecuteNonQuery() != 1) throw new LedgerValidationException("Obligation payment state changed concurrently.");
+        if (update.ExecuteNonQuery() != 1) throw new LedgerValidationException(LedgerReasonCode.ConcurrentStateChange, "Obligation payment state changed concurrently.");
         transaction.Commit();
         return result;
     }
@@ -366,7 +371,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
         LockExistingRun(connection, transaction, request.RunId);
         if (GetRunTransactionLimit(connection, transaction, request.RunId) is null)
-            throw new LedgerValidationException("Run transaction policy is not configured.");
+            throw new LedgerValidationException(LedgerReasonCode.RunPolicyNotConfigured, "Run transaction policy is not configured.");
         var result = CommitWithinTransaction(connection, transaction, request);
         transaction.Commit();
         return result;
@@ -379,7 +384,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         if (existing is not null)
         {
             if (Fingerprint(existing) != Fingerprint(request))
-                throw new IdempotencyConflictException("Idempotency key was previously used with a different payload.");
+                throw new IdempotencyConflictException(LedgerReasonCode.IdempotencyKeyConflict, "Idempotency key was previously used with a different payload.");
             return new CommitResult(existing.JournalId, true, true);
         }
 
@@ -390,13 +395,13 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         {
             var debit = request.Postings.Single(posting => posting.AmountSen < 0);
             var transactionLimitSen = GetRunTransactionLimit(connection, transaction, request.RunId)
-                ?? throw new LedgerValidationException("Run transaction policy is not configured.");
+                ?? throw new LedgerValidationException(LedgerReasonCode.RunPolicyNotConfigured, "Run transaction policy is not configured.");
             if (checked(-debit.AmountSen) > transactionLimitSen)
-                throw new LedgerValidationException("Run transaction limit exceeded.");
+                throw new LedgerValidationException(LedgerReasonCode.ExceedsTransactionLimit, "Run transaction limit exceeded.");
         }
 
         if (request.Kind == JournalKind.OpeningFunding && HasOpeningFunding(connection, transaction, request.RunId))
-            throw new LedgerValidationException("Run already has an opening funding journal.");
+            throw new LedgerValidationException(LedgerReasonCode.RunAlreadyFunded, "Run already has an opening funding journal.");
 
         var deltas = request.Postings.GroupBy(posting => posting.AccountId)
             .ToDictionary(group => group.Key, group => group.Aggregate(0L, (sum, posting) => checked(sum + posting.AmountSen)));
@@ -407,7 +412,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
             {
                 var balance = GetBalance(connection, transaction, request.RunId, accountId);
                 if (checked(balance + delta) < 0)
-                    throw new LedgerValidationException("Agent account cannot be overdrawn.");
+                    throw new LedgerValidationException(LedgerReasonCode.InsufficientFunds, "Agent account cannot be overdrawn.");
             }
         }
 
@@ -419,36 +424,16 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         return new CommitResult(journalId, true, false);
     }
 
-    private static void ValidateRequestFields(JournalRequest request)
-    {
-        if (request.RunId == Guid.Empty || string.IsNullOrWhiteSpace(request.IdempotencyKey) ||
-            string.IsNullOrWhiteSpace(request.Description))
-            throw new LedgerValidationException("Run, idempotency key, and description are required.");
-        if (request.Postings is null || request.Postings.Count != 2)
-            throw new LedgerValidationException("A journal requires exactly two postings.");
-        if (request.Postings.Any(posting => posting.AmountSen == 0 || posting.AccountId == Guid.Empty))
-            throw new LedgerValidationException("Postings require non-zero amounts and account IDs.");
-        if (checked(request.Postings[0].AmountSen + request.Postings[1].AmountSen) != 0)
-            throw new LedgerValidationException("Journal postings must balance to zero.");
-        if (request.Postings[0].AccountId == request.Postings[1].AccountId)
-            throw new LedgerValidationException("Journal postings must use distinct accounts.");
-    }
+    private static void ValidateRequestFields(JournalRequest request) =>
+        LedgerRequestValidation.ValidateJournalFields(request);
 
     private static void ValidateJournalShape(JournalRequest request, IReadOnlyDictionary<Guid, AccountKind> kinds)
     {
         if (kinds.Count != request.Postings.Count)
-            throw new LedgerValidationException("Every account must belong to the journal run.");
+            throw new LedgerValidationException(LedgerReasonCode.AccountNotInRun, "Every account must belong to the journal run.");
         var debit = request.Postings.Single(posting => posting.AmountSen < 0);
         var credit = request.Postings.Single(posting => posting.AmountSen > 0);
-        var valid = request.Kind switch
-        {
-            JournalKind.OpeningFunding => kinds[debit.AccountId] == AccountKind.SimulatorTreasury && kinds[credit.AccountId] == AccountKind.AgentCash,
-            JournalKind.Transfer => kinds[debit.AccountId] is AccountKind.AgentCash or AccountKind.AgentSavings && kinds[credit.AccountId] is AccountKind.Merchant or AccountKind.AgentCash or AccountKind.AgentSavings,
-            JournalKind.SavingsMove => kinds[debit.AccountId] == AccountKind.AgentCash && kinds[credit.AccountId] == AccountKind.AgentSavings,
-            JournalKind.BillPayment => kinds[debit.AccountId] == AccountKind.AgentCash && kinds[credit.AccountId] == AccountKind.Merchant,
-            _ => false
-        };
-        if (!valid) throw new LedgerValidationException("Posting account kinds are not permitted for this journal kind.");
+        LedgerRequestValidation.ValidateAccountKinds(request.Kind, kinds[debit.AccountId], kinds[credit.AccountId]);
     }
 
     private static void LockExistingRun(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
@@ -457,7 +442,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
             "SELECT id FROM experiment_runs WHERE id = @run_id FOR UPDATE", connection, transaction);
         command.Parameters.AddWithValue("run_id", runId);
         if (command.ExecuteScalar() is null)
-            throw new LedgerValidationException("Run does not exist.");
+            throw new LedgerValidationException(LedgerReasonCode.RunNotFound, "Run does not exist.");
     }
 
     private static IReadOnlyDictionary<Guid, AccountKind> LoadAccountKinds(NpgsqlConnection connection,
@@ -581,7 +566,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         command.Parameters.AddWithValue("run_id", runId);
         command.Parameters.AddWithValue("transaction_limit_sen", transactionLimitSen);
         if (command.ExecuteNonQuery() != 1)
-            throw new LedgerValidationException("Could not configure the run transaction policy.");
+            throw new LedgerValidationException(LedgerReasonCode.ConcurrentStateChange, "Could not configure the run transaction policy.");
     }
 
     private static (Guid JournalId, string IdempotencyKey, Guid CashAccountId, long AmountSen)? FindOpening(
@@ -644,7 +629,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         AccountKind.AgentCash => "agent_cash",
         AccountKind.AgentSavings => "agent_savings",
         AccountKind.Merchant => "merchant",
-        _ => throw new LedgerValidationException("Unsupported account kind.")
+        _ => throw new LedgerValidationException(LedgerReasonCode.UnsupportedAccountKind, "Unsupported account kind.")
     };
 
     private static string ToDatabaseValue(JournalKind kind) => kind switch
@@ -653,13 +638,13 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource)
         JournalKind.Transfer => "transfer",
         JournalKind.SavingsMove => "savings_move",
         JournalKind.BillPayment => "bill_payment",
-        _ => throw new LedgerValidationException("Unsupported journal kind.")
+        _ => throw new LedgerValidationException(LedgerReasonCode.LedgerInvariantViolation, "Unsupported journal kind.")
     };
 
     private static T FromDatabaseValue<T>(string value) where T : struct, Enum
     {
         var normalized = string.Concat(value.Split('_').Select(part => char.ToUpperInvariant(part[0]) + part[1..]));
         if (Enum.TryParse<T>(normalized, out var parsed)) return parsed;
-        throw new LedgerValidationException("Unsupported value stored in ledger.");
+        throw new LedgerValidationException(LedgerReasonCode.InternalError, "Unsupported value stored in ledger.");
     }
 }

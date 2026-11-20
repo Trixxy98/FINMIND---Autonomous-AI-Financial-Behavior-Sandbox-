@@ -71,6 +71,8 @@ The endpoint remains unauthenticated localhost-only development scaffolding.
 
 ## 3. Policy decision contract
 
+Implementation status: ADR-0005 defines the outcome categories and reason code catalog (`finance-reasons/v1`) that both ledgers and the local API now return. Decisions are not yet persisted; durable decision records arrive with the audit event store.
+
 Every proposal receives a durable decision with a stable reason code. Minimum outcomes: allowed, denied, malformed, unsupported capability, duplicate/replayed, and internal error. A denial is not a financial commit. Do not infer intent from the reason code.
 
 Policy inputs include run lifecycle, actor scope, tool grant/version, account ownership, destination allowlist, obligation state, amount and action limits, available balance, currency, idempotency status, and global run budgets. The model cannot provide authoritative values for these fields.

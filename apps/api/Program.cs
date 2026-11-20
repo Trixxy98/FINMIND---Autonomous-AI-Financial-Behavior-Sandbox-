@@ -1,11 +1,43 @@
+using Finmind.Api.Finance;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("Finmind")
     ?? throw new InvalidOperationException("Configure ConnectionStrings:Finmind before starting the API.");
 builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
-builder.Services.AddSingleton<Finmind.Api.Finance.PostgresLedger>();
+builder.Services.AddSingleton<PostgresLedger>();
 var app = builder.Build();
+
+// Every finance endpoint returns ADR-0005 bodies; internal errors are logged server-side only.
+IResult Execute(Func<IResult> action, bool isRead = false)
+{
+    try
+    {
+        return action();
+    }
+    catch (Exception ex)
+    {
+        var (statusCode, body) = isRead ? LedgerHttpResponses.ForReadException(ex) : LedgerHttpResponses.ForException(ex);
+        if (statusCode >= 500)
+            app.Logger.LogError(ex, "Finance request failed with {ReasonCode}.", body.ReasonCode);
+        return Results.Json(body, statusCode: statusCode);
+    }
+}
+
+IResult Error(LedgerReasonCode code, string message)
+{
+    var (statusCode, body) = LedgerHttpResponses.ForError(code, message);
+    return Results.Json(body, statusCode: statusCode);
+}
+
+IResult CommitResponse(CommitResult result) => Results.Ok(new
+{
+    status = LedgerHttpResponses.StatusFor(result),
+    reasonCode = (string?)null,
+    result.Committed,
+    result.JournalId,
+    result.WasIdempotentReplay
+});
 
 app.MapGet("/health", (NpgsqlDataSource dataSource) =>
 {
@@ -22,109 +54,55 @@ app.MapGet("/health", (NpgsqlDataSource dataSource) =>
     }
 });
 
-app.MapPost("/internal/runs/{runId:guid}/accounts", (Guid runId, CreateAccountRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
+app.MapPost("/internal/runs/{runId:guid}/accounts", (Guid runId, CreateAccountRequest request, PostgresLedger ledger) =>
 {
-    if (runId == Guid.Empty || !Enum.TryParse<Finmind.Api.Finance.AccountKind>(request.Kind, true, out var kind) || !Enum.IsDefined(kind))
-        return Results.BadRequest(new { error = "Unsupported account kind." });
-    try
+    if (string.IsNullOrWhiteSpace(request.Kind))
+        return Error(LedgerReasonCode.MissingRequiredField, "Account kind is required.");
+    if (!Enum.TryParse<AccountKind>(request.Kind, true, out var kind) || !Enum.IsDefined(kind))
+        return Error(LedgerReasonCode.UnsupportedAccountKind, "Unsupported account kind.");
+
+    return Execute(() =>
     {
         var accountId = ledger.CreateAccount(runId, kind);
         return Results.Created($"/internal/runs/{runId}/accounts/{accountId}", new { accountId, runId, kind = kind.ToString(), currency = "MYR" });
-    }
-    catch (Finmind.Api.Finance.LedgerValidationException ex)
-    {
-        return Results.BadRequest(new { error = ex.Message });
-    }
+    });
 });
 
-app.MapGet("/internal/runs/{runId:guid}/accounts/{accountId:guid}/balance", (Guid runId, Guid accountId, Finmind.Api.Finance.PostgresLedger ledger) =>
-{
-    try { return Results.Ok(new { runId, accountId, currency = "MYR", balanceSen = ledger.GetBalance(runId, accountId), source = "ledger" }); }
-    catch (Finmind.Api.Finance.LedgerValidationException) { return Results.NotFound(); }
-});
+app.MapGet("/internal/runs/{runId:guid}/accounts/{accountId:guid}/balance", (Guid runId, Guid accountId, PostgresLedger ledger) =>
+    Execute(() => Results.Ok(new { runId, accountId, currency = "MYR", balanceSen = ledger.GetBalance(runId, accountId), source = "ledger" }), isRead: true));
 
-app.MapPost("/internal/runs/{runId:guid}/funding", (Guid runId, FundingRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
-{
-    if (request.AmountSen <= 0) return Results.BadRequest(new { error = "Amount must be positive sen." });
-    try
+app.MapPost("/internal/runs/{runId:guid}/funding", (Guid runId, FundingRequest request, PostgresLedger ledger) =>
+    Execute(() =>
     {
         var result = ledger.OpenRun(runId, request.IdempotencyKey, request.AmountSen, request.TransactionLimitSen);
-        return Results.Ok(new { result.JournalId, result.Committed, result.WasIdempotentReplay, cashAccountId = result.CashAccountId, balanceSen = ledger.GetBalance(runId, result.CashAccountId), currency = "MYR" });
-    }
-    catch (Finmind.Api.Finance.IdempotencyConflictException) { return Results.Conflict(new { error = "Idempotency key reused with a different payload." }); }
-    catch (Finmind.Api.Finance.LedgerValidationException ex) { return Results.BadRequest(new { error = ex.Message }); }
-    catch (OverflowException) { return Results.BadRequest(new { error = "Amount exceeds supported range." }); }
-});
-
-app.MapPost("/internal/runs/{runId:guid}/transfers", (Guid runId, TransferRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
-{
-    try
-    {
-        var result = ledger.Transfer(runId, request.IdempotencyKey, request.SourceAccountId, request.DestinationAccountId, request.AmountSen);
-        return Results.Ok(new { result.JournalId, result.Committed, result.WasIdempotentReplay });
-    }
-    catch (Finmind.Api.Finance.IdempotencyConflictException) { return Results.Conflict(new { error = "Idempotency key reused with a different payload." }); }
-    catch (Finmind.Api.Finance.LedgerValidationException ex) { return Results.BadRequest(new { error = ex.Message }); }
-    catch (OverflowException) { return Results.BadRequest(new { error = "Amount exceeds supported range." }); }
-});
-
-app.MapPost("/internal/runs/{runId:guid}/savings", (Guid runId, SavingsRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
-{
-    try
-    {
-        var result = ledger.MoveToSavings(runId, request.IdempotencyKey, request.CashAccountId, request.SavingsAccountId, request.AmountSen);
-        return Results.Ok(new { result.JournalId, result.Committed, result.WasIdempotentReplay });
-    }
-    catch (Finmind.Api.Finance.IdempotencyConflictException) { return Results.Conflict(new { error = "Idempotency key reused with a different payload." }); }
-    catch (Finmind.Api.Finance.LedgerValidationException ex) { return Results.BadRequest(new { error = ex.Message }); }
-    catch (OverflowException) { return Results.BadRequest(new { error = "Amount exceeds supported range." }); }
-});
-
-app.MapPost("/internal/runs/{runId:guid}/bill-payments", (Guid runId, BillPaymentRequest request, Finmind.Api.Finance.PostgresLedger ledger) =>
-{
-    try
-    {
-        var result = ledger.PayObligation(runId, request.IdempotencyKey, request.CashAccountId, request.ObligationId);
-        return Results.Ok(new { result.JournalId, result.Committed, result.WasIdempotentReplay });
-    }
-    catch (Finmind.Api.Finance.IdempotencyConflictException) { return Results.Conflict(new { error = "Idempotency key reused with a different payload." }); }
-    catch (Finmind.Api.Finance.LedgerValidationException ex) { return Results.BadRequest(new { error = ex.Message }); }
-    catch (OverflowException) { return Results.BadRequest(new { error = "Amount exceeds supported range." }); }
-});
-
-app.MapPost("/internal/runs/{runId:guid}/obligations",
-    (Guid runId,
-     CreateObligationRequest request,
-     Finmind.Api.Finance.PostgresLedger ledger) =>
-{
-    try
-    {
-        var obligation = ledger.CreateObligation(
-            runId,
-            request.MerchantAccountId,
-            request.AmountSen,
-            request.InvoiceReference);
-
-        return Results.Ok(obligation);
-    }
-    catch (Finmind.Api.Finance.IdempotencyConflictException)
-    {
-        return Results.Conflict(new
+        return Results.Ok(new
         {
-            error = "Invoice reference reused with different details."
+            status = LedgerReasonCodes.ToWireValue(result.WasIdempotentReplay ? LedgerOutcome.Replayed : LedgerOutcome.Committed),
+            reasonCode = (string?)null,
+            result.Committed,
+            result.JournalId,
+            result.WasIdempotentReplay,
+            cashAccountId = result.CashAccountId,
+            balanceSen = ledger.GetBalance(runId, result.CashAccountId),
+            currency = "MYR"
         });
-    }
-    catch (Finmind.Api.Finance.LedgerValidationException ex)
-    {
-        return Results.BadRequest(new { error = ex.Message });
-    }
-});
+    }));
 
-app.MapGet("/internal/runs/{runId:guid}/obligations/{obligationId:guid}", (Guid runId, Guid obligationId, Finmind.Api.Finance.PostgresLedger ledger) =>
-{
-    try { return Results.Ok(ledger.GetObligation(runId, obligationId)); }
-    catch (Finmind.Api.Finance.LedgerValidationException) { return Results.NotFound(); }
-});
+app.MapPost("/internal/runs/{runId:guid}/transfers", (Guid runId, TransferRequest request, PostgresLedger ledger) =>
+    Execute(() => CommitResponse(ledger.Transfer(runId, request.IdempotencyKey, request.SourceAccountId, request.DestinationAccountId, request.AmountSen))));
+
+app.MapPost("/internal/runs/{runId:guid}/savings", (Guid runId, SavingsRequest request, PostgresLedger ledger) =>
+    Execute(() => CommitResponse(ledger.MoveToSavings(runId, request.IdempotencyKey, request.CashAccountId, request.SavingsAccountId, request.AmountSen))));
+
+app.MapPost("/internal/runs/{runId:guid}/bill-payments", (Guid runId, BillPaymentRequest request, PostgresLedger ledger) =>
+    Execute(() => CommitResponse(ledger.PayObligation(runId, request.IdempotencyKey, request.CashAccountId, request.ObligationId))));
+
+// Obligation setup never moves money; success keeps returning the stored obligation.
+app.MapPost("/internal/runs/{runId:guid}/obligations", (Guid runId, CreateObligationRequest request, PostgresLedger ledger) =>
+    Execute(() => Results.Ok(ledger.CreateObligation(runId, request.MerchantAccountId, request.AmountSen, request.InvoiceReference))));
+
+app.MapGet("/internal/runs/{runId:guid}/obligations/{obligationId:guid}", (Guid runId, Guid obligationId, PostgresLedger ledger) =>
+    Execute(() => Results.Ok(ledger.GetObligation(runId, obligationId)), isRead: true));
 
 app.Run("http://127.0.0.1:5080");
 

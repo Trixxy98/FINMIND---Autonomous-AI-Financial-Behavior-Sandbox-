@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-finmind}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-only}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - finmind-postgres:/var/lib/postgresql
     healthcheck:
