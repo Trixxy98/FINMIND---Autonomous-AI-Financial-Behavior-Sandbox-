@@ -129,6 +129,11 @@ Catalog `finance-reasons/v3` (ADR-0008) adds `INVALID_RUN_CONFIG`
 (denied). `INVALID_RUN_CONFIG` responses also include `fields`, the names
 of invalid configuration fields (never their values).
 
+Catalog `finance-reasons/v4` (ADR-0009) adds the outcome
+`unsupported_capability` with code `UNSUPPORTED_CAPABILITY`, plus
+`INVALID_TOOL_ARGUMENTS` (malformed), `ACTION_BUDGET_EXCEEDED` (denied),
+and `TOOL_CALL_ID_CONFLICT` (conflict).
+
 ## Out of scope
 
 - Durable storage of decisions. Persisting proposals and decisions with

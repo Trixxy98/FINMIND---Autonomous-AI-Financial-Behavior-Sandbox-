@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using Finmind.Api.Finance;
 using Npgsql;
@@ -7,6 +8,7 @@ var connectionString = builder.Configuration.GetConnectionString("Finmind")
     ?? throw new InvalidOperationException("Configure ConnectionStrings:Finmind before starting the API.");
 builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
 builder.Services.AddSingleton<PostgresLedger>();
+builder.Services.AddSingleton(sp => new ToolGateway(sp.GetRequiredService<PostgresLedger>(), TimeProvider.System));
 var app = builder.Build();
 
 // ADR-0010: invalid scenario files stop startup.
@@ -164,6 +166,95 @@ app.MapGet("/internal/runs/{runId:guid}/events", (Guid runId, long? afterSequenc
         });
     }, isRead: true));
 
+// ADR-0009 worker interface. Routes exist only when a worker credential of at least 32 characters is configured.
+var workerToken = builder.Configuration["FINMIND_WORKER_TOKEN"];
+if (workerToken is { Length: >= 32 })
+{
+    var workerTokenHash = ToolGateway.HashToken(workerToken);
+    string? Bearer(HttpRequest request) =>
+        request.Headers.Authorization.ToString() is var header && header.StartsWith("Bearer ", StringComparison.Ordinal)
+            ? header["Bearer ".Length..].Trim() : null;
+    bool IsWorker(HttpRequest request) =>
+        Bearer(request) is { } presented && CryptographicOperations.FixedTimeEquals(ToolGateway.HashToken(presented), workerTokenHash);
+
+    var worker = app.MapGroup("/internal/worker");
+
+    worker.MapPost("/runs/claim", (HttpRequest request, ToolGateway gateway) =>
+    {
+        if (!IsWorker(request)) return Results.StatusCode(401);
+        return Execute(() =>
+        {
+            if (gateway.Claim() is not { } claim) return Results.NoContent();
+            return Results.Ok(new
+            {
+                runId = claim.Run.RunId,
+                sessionToken = claim.Token,
+                configSnapshot = claim.Run.ConfigSnapshot,
+                configHash = claim.Run.ConfigHash,
+                toolsetVersion = ToolCatalog.Version,
+                tools = ToolCatalog.Schemas(),
+                unavailableCapabilities = ToolCatalog.UnavailableCapabilities.Order(StringComparer.Ordinal)
+            });
+        });
+    });
+
+    // Session routes: the run is resolved from the session token only.
+    IResult WithSession(HttpRequest request, ToolGateway gateway, Func<Guid, IResult> action) =>
+        gateway.ResolveSession(Bearer(request)) is { } runId ? action(runId) : Results.StatusCode(401);
+
+    worker.MapPost("/session/initialize", (HttpRequest request, ToolGateway gateway, PostgresLedger ledger) =>
+        WithSession(request, gateway, runId => Execute(() =>
+        {
+            ledger.ActivateRun(runId, FinanceEvents.WorkerSource);
+            return Results.Ok(new { runId, status = ledger.GetRun(runId).Status, environment = ledger.GetEnvironment(runId) });
+        })));
+
+    worker.MapPost("/session/heartbeat", (HttpRequest request, ToolGateway gateway, PostgresLedger ledger) =>
+        WithSession(request, gateway, runId => Execute(() => Results.Ok(new { runId, status = ledger.GetRun(runId).Status }), isRead: true)));
+
+    worker.MapPost("/session/tool-calls", async (HttpRequest request, ToolGateway gateway) =>
+    {
+        if (gateway.ResolveSession(Bearer(request)) is not { } runId) return Results.StatusCode(401);
+        if (request.ContentLength is > 16_384) return Results.StatusCode(413);
+        var buffer = new byte[16_385];
+        var length = 0;
+        int read;
+        while ((read = await request.Body.ReadAsync(buffer.AsMemory(length))) > 0)
+        {
+            length += read;
+            if (length > 16_384) return Results.StatusCode(413);
+        }
+
+        JsonObject? body;
+        try { body = JsonNode.Parse(buffer.AsSpan(0, length))?.AsObject(); }
+        catch (Exception) { body = null; }
+        if (body is null || body.Any(p => p.Key is not ("toolCallId" or "tool" or "arguments"))
+            || (string?)(body["toolCallId"] as JsonValue) is not { } toolCallId || !ToolGateway.IsValidToolCallId(toolCallId)
+            || (string?)(body["tool"] as JsonValue) is not { Length: >= 1 and <= 100 } tool)
+            return Results.BadRequest(new { error = "Body must be { toolCallId, tool, arguments } with a printable toolCallId of 1-100 characters." });
+
+        return Execute(() => Results.Json(gateway.Execute(runId, toolCallId, tool, body["arguments"]?.DeepClone())));
+    });
+
+    worker.MapPost("/session/finish", (HttpRequest request, FinishRunRequest finish, ToolGateway gateway, PostgresLedger ledger) =>
+        WithSession(request, gateway, runId => Execute(() =>
+        {
+            RunStatus? target = finish.Outcome switch
+            {
+                "completed" => RunStatus.Completed,
+                "failed" => RunStatus.Failed,
+                "budget_exceeded" => RunStatus.BudgetExceeded,
+                _ => null
+            };
+            if (target is null) return Error(LedgerReasonCode.MissingRequiredField, "Outcome must be completed, failed, or budget_exceeded.");
+            return Results.Ok(ledger.TransitionRun(runId, target.Value, finish.Reason, FinanceEvents.WorkerSource));
+        })));
+}
+else
+{
+    app.Logger.LogWarning("FINMIND_WORKER_TOKEN is missing or shorter than 32 characters; worker routes are disabled.");
+}
+
 app.Run("http://127.0.0.1:5080");
 
 internal sealed record CreateAccountRequest(string Kind);
@@ -172,5 +263,6 @@ internal sealed record TransferRequest(string IdempotencyKey, Guid SourceAccount
 internal sealed record SavingsRequest(string IdempotencyKey, Guid CashAccountId, Guid SavingsAccountId, long AmountSen);
 internal sealed record BillPaymentRequest(string IdempotencyKey, Guid CashAccountId, Guid ObligationId);
 internal sealed record CancelRunRequest(string? Reason);
+internal sealed record FinishRunRequest(string? Outcome, string? Reason);
 internal sealed record ReversalRequest(string IdempotencyKey, string Reason);
 internal sealed record CreateObligationRequest(Guid MerchantAccountId, long AmountSen, string InvoiceReference);

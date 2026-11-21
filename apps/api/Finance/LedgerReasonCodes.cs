@@ -2,7 +2,7 @@ namespace Finmind.Api.Finance;
 
 // Outcome and reason code catalog v1. See docs/decisions/ADR-0005-policy-decisions-and-reason-codes.md.
 // Wire values are a published contract: append new codes, never rename or reuse existing ones.
-public enum LedgerOutcome { Committed, Replayed, Malformed, Denied, Conflict, InternalError }
+public enum LedgerOutcome { Committed, Replayed, Malformed, Denied, Conflict, InternalError, UnsupportedCapability }
 
 public enum LedgerReasonCode
 {
@@ -35,12 +35,17 @@ public enum LedgerReasonCode
     // finance-reasons/v3 (ADR-0008)
     InvalidRunConfig,
     InvalidRunTransition,
-    RunNotActive
+    RunNotActive,
+    // finance-reasons/v4 (ADR-0009)
+    UnsupportedCapability,
+    InvalidToolArguments,
+    ActionBudgetExceeded,
+    ToolCallIdConflict
 }
 
 public static class LedgerReasonCodes
 {
-    public const string CatalogVersion = "finance-reasons/v3";
+    public const string CatalogVersion = "finance-reasons/v4";
 
     public static LedgerOutcome OutcomeOf(LedgerReasonCode code) => code switch
     {
@@ -50,7 +55,8 @@ public static class LedgerReasonCodes
             or LedgerReasonCode.UnsupportedAccountKind
             or LedgerReasonCode.SameSourceAndDestination
             or LedgerReasonCode.UnsupportedInitiatorType
-            or LedgerReasonCode.InvalidRunConfig => LedgerOutcome.Malformed,
+            or LedgerReasonCode.InvalidRunConfig
+            or LedgerReasonCode.InvalidToolArguments => LedgerOutcome.Malformed,
         LedgerReasonCode.RunNotFound
             or LedgerReasonCode.RunPolicyNotConfigured
             or LedgerReasonCode.RunAlreadyFunded
@@ -64,11 +70,14 @@ public static class LedgerReasonCodes
             or LedgerReasonCode.JournalNotFound
             or LedgerReasonCode.JournalAlreadyReversed
             or LedgerReasonCode.JournalNotReversible
-            or LedgerReasonCode.RunNotActive => LedgerOutcome.Denied,
+            or LedgerReasonCode.RunNotActive
+            or LedgerReasonCode.ActionBudgetExceeded => LedgerOutcome.Denied,
         LedgerReasonCode.IdempotencyKeyConflict
             or LedgerReasonCode.InvoiceReferenceConflict
             or LedgerReasonCode.RunPolicyConflict
-            or LedgerReasonCode.InvalidRunTransition => LedgerOutcome.Conflict,
+            or LedgerReasonCode.InvalidRunTransition
+            or LedgerReasonCode.ToolCallIdConflict => LedgerOutcome.Conflict,
+        LedgerReasonCode.UnsupportedCapability => LedgerOutcome.UnsupportedCapability,
         LedgerReasonCode.ConcurrentStateChange
             or LedgerReasonCode.LedgerInvariantViolation
             or LedgerReasonCode.InternalError => LedgerOutcome.InternalError,
@@ -105,6 +114,10 @@ public static class LedgerReasonCodes
         LedgerReasonCode.InvalidRunConfig => "INVALID_RUN_CONFIG",
         LedgerReasonCode.InvalidRunTransition => "INVALID_RUN_TRANSITION",
         LedgerReasonCode.RunNotActive => "RUN_NOT_ACTIVE",
+        LedgerReasonCode.UnsupportedCapability => "UNSUPPORTED_CAPABILITY",
+        LedgerReasonCode.InvalidToolArguments => "INVALID_TOOL_ARGUMENTS",
+        LedgerReasonCode.ActionBudgetExceeded => "ACTION_BUDGET_EXCEEDED",
+        LedgerReasonCode.ToolCallIdConflict => "TOOL_CALL_ID_CONFLICT",
         _ => "INTERNAL_ERROR"
     };
 
@@ -115,6 +128,7 @@ public static class LedgerReasonCodes
         LedgerOutcome.Malformed => "malformed",
         LedgerOutcome.Denied => "denied",
         LedgerOutcome.Conflict => "conflict",
+        LedgerOutcome.UnsupportedCapability => "unsupported_capability",
         _ => "internal_error"
     };
 }

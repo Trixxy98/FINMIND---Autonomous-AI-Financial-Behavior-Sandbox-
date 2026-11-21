@@ -44,6 +44,13 @@ public interface IFinanceLedger
     OpenRunResult ActivateRun(Guid runId, string source);
     ClockResult AdvanceClock(Guid runId, int days, string source);
     EnvironmentView GetEnvironment(Guid runId);
+
+    // ADR-0009 gateway support. Token hashes are SHA-256 of the session token; tokens are never stored.
+    RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset expiresAt);
+    Guid? ResolveSession(byte[] tokenHash, DateTimeOffset now, DateTimeOffset newExpiresAt);
+    ToolCallBegin BeginToolCall(Guid runId, string toolCallId, string tool, JsonObject redactedArguments, string requestHash);
+    void CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion);
+    AgentView GetAgentView(Guid runId);
 }
 
 public static class RunEventPaging
@@ -178,6 +185,18 @@ public sealed class InMemoryLedger : IFinanceLedger
     private readonly Dictionary<Guid, List<RunEvent>> _events = [];
     private List<PendingEvent>? _pending;
     private readonly Dictionary<Guid, ManagedRun> _managedRuns = [];
+    private readonly Dictionary<string, (Guid RunId, DateTimeOffset ExpiresAt, bool Revoked)> _sessions = [];
+    private readonly Dictionary<(Guid RunId, string ToolCallId), ToolCallRecord> _toolCalls = [];
+
+    private sealed class ToolCallRecord(string tool, JsonObject arguments, string requestHash)
+    {
+        public string Tool { get; } = tool;
+        public JsonObject Arguments { get; } = arguments;
+        public string RequestHash { get; } = requestHash;
+        public JsonObject? Response;
+        public string? Outcome, ReasonCode;
+        public Guid? JournalId;
+    }
 
     private sealed class ManagedRun(JsonObject snapshot, string hash)
     {
@@ -717,6 +736,7 @@ public sealed class InMemoryLedger : IFinanceLedger
                 if (to == RunStatus.Running)
                     throw new IdempotencyConflictException(LedgerReasonCode.InvalidRunTransition, "Runs enter RUNNING only through activation.");
                 SetStatus(runId, to, storedReason);
+                if (AgentGatewayRules.IsTerminal(to)) RevokeSessions(runId);
                 Emit(FinanceEvents.RunStatusChanged(FinanceEvents.Operations.TransitionRun, from!.Value, to, storedReason, source));
                 return true;
             });
@@ -735,7 +755,8 @@ public sealed class InMemoryLedger : IFinanceLedger
             var opening = OpenRunCore(runId, RunLifecycle.OpeningIdempotencyKey, RunConfiguration.StartingBalance(snapshot),
                 RunConfiguration.TransactionLimit(snapshot), FinanceEvents.Operations.ActivateRun);
 
-            // ADR-0010: same order as PostgresLedger.ActivateRun.
+            // ADR-0009: the agent's savings account; ADR-0010: same order as PostgresLedger.ActivateRun.
+            CreateAccountCore(runId, AccountKind.AgentSavings, FinanceEvents.Operations.ActivateRun);
             run.VirtualStart = scenario.VirtualStartDate;
             run.VirtualDay = 0;
             foreach (var merchant in scenario.Merchants)
@@ -820,6 +841,99 @@ public sealed class InMemoryLedger : IFinanceLedger
         return due.Select(s => s.Event.Key).ToArray();
     }
 
+    public RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset expiresAt)
+    {
+        lock (_gate)
+        {
+            var next = _managedRuns.Where(r => r.Value.Status == RunStatus.Queued)
+                .OrderBy(r => r.Value.QueuedAt).ThenBy(r => r.Key).Select(r => (Guid?)r.Key).FirstOrDefault();
+            if (next is not { } runId) return null;
+            SetStatus(runId, RunStatus.Initializing, null);
+            RevokeSessions(runId);
+            _sessions[Convert.ToHexString(tokenHash)] = (runId, expiresAt, false);
+            StoreEvent(runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ClaimRun, RunStatus.Queued,
+                RunStatus.Initializing, null, FinanceEvents.WorkerSource));
+            return GetRun(runId);
+        }
+    }
+
+    public Guid? ResolveSession(byte[] tokenHash, DateTimeOffset now, DateTimeOffset newExpiresAt)
+    {
+        lock (_gate)
+        {
+            var key = Convert.ToHexString(tokenHash);
+            if (!_sessions.TryGetValue(key, out var session) || session.Revoked || session.ExpiresAt <= now) return null;
+            _sessions[key] = session with { ExpiresAt = newExpiresAt };
+            return session.RunId;
+        }
+    }
+
+    private void RevokeSessions(Guid runId)
+    {
+        foreach (var key in _sessions.Where(s => s.Value.RunId == runId && !s.Value.Revoked).Select(s => s.Key).ToArray())
+            _sessions[key] = _sessions[key] with { Revoked = true };
+    }
+
+    public ToolCallBegin BeginToolCall(Guid runId, string toolCallId, string tool, JsonObject redactedArguments, string requestHash)
+    {
+        lock (_gate)
+        {
+            var status = RequireRun(runId);
+            if (_toolCalls.TryGetValue((runId, toolCallId), out var existing))
+            {
+                if (existing.RequestHash != requestHash) return new ToolCallBegin(ToolCallBeginKind.Conflict, null, null);
+                if (existing.Response is not null) return new ToolCallBegin(ToolCallBeginKind.Replay, (JsonObject)existing.Response.DeepClone(), null);
+                return new ToolCallBegin(ToolCallBeginKind.Resume, null, status == RunStatus.Running ? null : LedgerReasonCode.RunNotActive);
+            }
+
+            var counted = _toolCalls.Keys.Count(k => k.RunId == runId);
+            _toolCalls[(runId, toolCallId)] = new ToolCallRecord(tool, (JsonObject)redactedArguments.DeepClone(), requestHash);
+            StoreEvent(runId, FinanceEvents.ToolCallProposed(toolCallId, tool, redactedArguments));
+            if (status != RunStatus.Running) return new ToolCallBegin(ToolCallBeginKind.New, null, LedgerReasonCode.RunNotActive);
+            if (counted >= AgentGatewayRules.MaxActions(_managedRuns[runId].Snapshot))
+            {
+                SetStatus(runId, RunStatus.BudgetExceeded, AgentGatewayRules.BudgetExhaustedReason);
+                RevokeSessions(runId);
+                StoreEvent(runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ToolCall, RunStatus.Running,
+                    RunStatus.BudgetExceeded, AgentGatewayRules.BudgetExhaustedReason, FinanceEvents.GatewaySource) with { TraceId = toolCallId });
+                return new ToolCallBegin(ToolCallBeginKind.New, null, LedgerReasonCode.ActionBudgetExceeded);
+            }
+            return new ToolCallBegin(ToolCallBeginKind.New, null, null);
+        }
+    }
+
+    public void CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion)
+    {
+        lock (_gate)
+        {
+            var record = _toolCalls[(runId, toolCallId)];
+            if (record.Response is not null) return;
+            if (completion.ExtraEvent is { } extra) StoreEvent(runId, extra);
+            record.Response = (JsonObject)completion.Response.DeepClone();
+            record.Outcome = completion.Status;
+            record.ReasonCode = completion.ReasonCode;
+            record.JournalId = completion.JournalId;
+            StoreEvent(runId, FinanceEvents.ToolReturned(toolCallId, tool, completion.Status, completion.ReasonCode, completion.JournalId));
+        }
+    }
+
+    public AgentView GetAgentView(Guid runId)
+    {
+        lock (_gate)
+        {
+            RequireRun(runId);
+            var accounts = _accounts.Where(a => a.Value.RunId == runId).ToArray();
+            var cash = accounts.Where(a => a.Value.Kind == AccountKind.AgentCash).Select(a => (Guid?)a.Key).FirstOrDefault()
+                ?? throw new LedgerValidationException(LedgerReasonCode.RunNotActive, "Run has no agent account.");
+            Guid? savings = accounts.Where(a => a.Value.Kind == AccountKind.AgentSavings).Select(a => (Guid?)a.Key).FirstOrDefault();
+            var merchants = accounts.Where(a => a.Value.ScenarioKey is not null)
+                .Select(a => new AgentMerchant(a.Key, a.Value.ScenarioKey!, a.Value.Label!))
+                .OrderBy(m => m.Key, StringComparer.Ordinal).ToArray();
+            var obligations = _obligations.Where(o => o.Value.RunId == runId).Select(o => GetObligation(runId, o.Key));
+            return new AgentView(cash, savings, merchants, AgentGatewayRules.Order(obligations));
+        }
+    }
+
     // Mirrors PostgresLedger.LockExistingRun: unknown → RUN_NOT_FOUND; legacy → null status.
     private RunStatus? RequireRun(Guid runId)
     {
@@ -877,6 +991,7 @@ public sealed class InMemoryLedger : IFinanceLedger
     // Events are kept only for runs this ledger has opened (ADR-0007 "Unrecordable requests").
     private void StoreEvent(Guid runId, PendingEvent pending)
     {
+        pending = pending.WithCallContext();
         if (!_runTransactionLimits.ContainsKey(runId)) return;
         if (!_events.TryGetValue(runId, out var events)) _events[runId] = events = [];
         events.Add(new RunEvent(runId, events.Count + 1, pending.EventType, pending.EventVersion, DateTimeOffset.UtcNow,
@@ -884,7 +999,8 @@ public sealed class InMemoryLedger : IFinanceLedger
             pending.JournalId, pending.ObligationId, (JsonObject)pending.Payload.DeepClone(), null,
             _managedRuns.TryGetValue(runId, out var managed) && managed.VirtualDay is { } day
                 ? new DateTimeOffset(managed.VirtualStart!.Value.AddDays(day), TimeOnly.MinValue, TimeSpan.Zero)
-                : null));
+                : null,
+            pending.TraceId));
     }
 
     public IReadOnlyList<RunEvent> GetEvents(Guid runId, long afterSequence, int limit)

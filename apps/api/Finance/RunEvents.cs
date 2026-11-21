@@ -7,16 +7,41 @@ namespace Finmind.Api.Finance;
 public sealed record RunEvent(
     Guid RunId, long Sequence, string EventType, int EventVersion, DateTimeOffset OccurredAt, string Source,
     string? Operation, string? Outcome, string? ReasonCode, string? IdempotencyKey,
-    Guid? JournalId, Guid? ObligationId, JsonObject Payload, string? EventHash, DateTimeOffset? VirtualTime = null);
+    Guid? JournalId, Guid? ObligationId, JsonObject Payload, string? EventHash, DateTimeOffset? VirtualTime = null,
+    string? TraceId = null);
 
 // An event built by an operation before the database assigns its sequence and hash.
-internal sealed record PendingEvent(
+public sealed record PendingEvent(
     string EventType, JsonObject Payload, string Source = FinanceEvents.InternalApiSource,
     string? Operation = null, string? Outcome = null, string? ReasonCode = null, string? IdempotencyKey = null,
-    Guid? JournalId = null, Guid? ObligationId = null, int EventVersion = FinanceEvents.Version);
+    Guid? JournalId = null, Guid? ObligationId = null, int EventVersion = FinanceEvents.Version, string? TraceId = null)
+{
+    // ADR-0009: inside an agent tool call, every event carries the call's source and trace ID.
+    public PendingEvent WithCallContext() =>
+        FinanceCallContext.Current is { } context && TraceId is null ? this with { Source = context.Source, TraceId = context.TraceId } : this;
+}
+
+// Ambient context for ledger calls made on behalf of an agent tool call.
+public sealed record FinanceCallContext(string Source, string TraceId)
+{
+    private static readonly AsyncLocal<FinanceCallContext?> Ambient = new();
+    public static FinanceCallContext? Current => Ambient.Value;
+
+    public static IDisposable Begin(string source, string traceId)
+    {
+        var previous = Ambient.Value;
+        Ambient.Value = new FinanceCallContext(source, traceId);
+        return new Restore(previous);
+    }
+
+    private sealed class Restore(FinanceCallContext? previous) : IDisposable
+    {
+        public void Dispose() => Ambient.Value = previous;
+    }
+}
 
 // Single source of event types and payloads so both ledgers record identical events.
-internal static class FinanceEvents
+public static class FinanceEvents
 {
     public const int Version = 1;
     public const string InternalApiSource = "internal_api";
@@ -36,7 +61,29 @@ internal static class FinanceEvents
         public const string TransitionRun = "transition_run";
         public const string ActivateRun = "activate_run";
         public const string AdvanceClock = "advance_clock";
+        public const string ToolCall = "tool_call";
+        public const string ClaimRun = "claim_run";
     }
+
+    public const string AgentSource = "agent";
+    public const string WorkerSource = "worker";
+    public const string GatewaySource = "gateway";
+
+    // ADR-0009 tool-call events. Arguments and agent text are stored redacted.
+    public static PendingEvent ToolCallProposed(string toolCallId, string tool, JsonObject redactedArguments) =>
+        new("TOOL_CALL_PROPOSED", new JsonObject
+        {
+            ["toolCallId"] = toolCallId, ["tool"] = tool, ["arguments"] = redactedArguments.DeepClone()
+        }, AgentSource, Operations.ToolCall, TraceId: toolCallId);
+
+    public static PendingEvent ToolReturned(string toolCallId, string tool, string status, string? reasonCode, Guid? journalId) =>
+        new("TOOL_RETURNED", new JsonObject
+        {
+            ["toolCallId"] = toolCallId, ["tool"] = tool, ["status"] = status, ["reasonCode"] = reasonCode, ["journalId"] = journalId
+        }, AgentSource, Operations.ToolCall, status, reasonCode, TraceId: toolCallId);
+
+    public static PendingEvent AgentEvent(string eventType, string toolCallId, JsonObject payload) =>
+        new(eventType, payload, AgentSource, Operations.ToolCall, TraceId: toolCallId);
 
     // ADR-0010 scenario and clock events.
     public static PendingEvent ScenarioAccountCreated(Guid accountId, ScenarioMerchant merchant) =>

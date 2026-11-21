@@ -522,6 +522,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                 if (to == RunStatus.Running)
                     throw new IdempotencyConflictException(LedgerReasonCode.InvalidRunTransition, "Runs enter RUNNING only through activation.");
                 UpdateRunStatus(connection, transaction, runId, to, storedReason);
+                if (AgentGatewayRules.IsTerminal(to)) RevokeSessions(connection, transaction, runId);
                 AppendEvent(connection, transaction, runId,
                     FinanceEvents.RunStatusChanged(FinanceEvents.Operations.TransitionRun, from!.Value, to, storedReason, source));
                 transaction.Commit();
@@ -553,6 +554,11 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             var opening = OpenRunWithinTransaction(connection, transaction, runId, RunLifecycle.OpeningIdempotencyKey,
                 RunConfiguration.StartingBalance(snapshot), RunConfiguration.TransactionLimit(snapshot), false,
                 FinanceEvents.Operations.ActivateRun);
+
+            // ADR-0009: the agent's savings account.
+            var savingsId = Guid.NewGuid();
+            InsertAccount(connection, transaction, runId, savingsId, AccountKind.AgentSavings);
+            AppendEvent(connection, transaction, runId, FinanceEvents.AccountCreated(FinanceEvents.Operations.ActivateRun, savingsId, AccountKind.AgentSavings));
 
             // ADR-0010: merchants, the stored schedule, and day-0 deliveries commit with opening funding.
             foreach (var merchant in scenario.Merchants)
@@ -706,6 +712,185 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         return due.Select(e => e.Key).ToArray();
     }
 
+    public RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset expiresAt)
+    {
+        Guid runId;
+        using (var connection = dataSource.OpenConnection())
+        using (var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted))
+        {
+            using var select = new NpgsqlCommand(
+                "SELECT id FROM experiment_runs WHERE status = 'QUEUED' ORDER BY queued_at, id LIMIT 1 FOR UPDATE SKIP LOCKED",
+                connection, transaction);
+            if (select.ExecuteScalar() is not Guid claimed)
+            {
+                transaction.Commit();
+                return null;
+            }
+            runId = claimed;
+            UpdateRunStatus(connection, transaction, runId, RunStatus.Initializing, null);
+            RevokeSessions(connection, transaction, runId);
+            using var insert = new NpgsqlCommand(
+                "INSERT INTO run_sessions (id, run_id, token_hash, expires_at) VALUES (@id, @run_id, @hash, @expires)",
+                connection, transaction);
+            insert.Parameters.AddWithValue("id", Guid.NewGuid());
+            insert.Parameters.AddWithValue("run_id", runId);
+            insert.Parameters.AddWithValue("hash", tokenHash);
+            insert.Parameters.AddWithValue("expires", expiresAt);
+            insert.ExecuteNonQuery();
+            AppendEvent(connection, transaction, runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ClaimRun,
+                RunStatus.Queued, RunStatus.Initializing, null, FinanceEvents.WorkerSource));
+            transaction.Commit();
+        }
+        return GetRun(runId);
+    }
+
+    public Guid? ResolveSession(byte[] tokenHash, DateTimeOffset now, DateTimeOffset newExpiresAt)
+    {
+        using var connection = dataSource.OpenConnection();
+        using var command = new NpgsqlCommand(
+            "UPDATE run_sessions SET expires_at = @new_expires WHERE token_hash = @hash AND revoked_at IS NULL " +
+            "AND expires_at > @now RETURNING run_id", connection);
+        command.Parameters.AddWithValue("hash", tokenHash);
+        command.Parameters.AddWithValue("now", now);
+        command.Parameters.AddWithValue("new_expires", newExpiresAt);
+        return command.ExecuteScalar() as Guid?;
+    }
+
+    private static void RevokeSessions(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
+    {
+        using var command = new NpgsqlCommand(
+            "UPDATE run_sessions SET revoked_at = now() WHERE run_id = @run_id AND revoked_at IS NULL", connection, transaction);
+        command.Parameters.AddWithValue("run_id", runId);
+        command.ExecuteNonQuery();
+    }
+
+    // Records the call and TOOL_CALL_PROPOSED under the run lock, then checks status and the action budget.
+    public ToolCallBegin BeginToolCall(Guid runId, string toolCallId, string tool, JsonObject redactedArguments, string requestHash)
+    {
+        using var connection = dataSource.OpenConnection();
+        using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+        var status = LockExistingRun(connection, transaction, runId);
+
+        using (var existing = new NpgsqlCommand(
+            "SELECT request_hash, response::text FROM tool_calls WHERE run_id = @run_id AND tool_call_id = @id", connection, transaction))
+        {
+            existing.Parameters.AddWithValue("run_id", runId);
+            existing.Parameters.AddWithValue("id", toolCallId);
+            using var reader = existing.ExecuteReader();
+            if (reader.Read())
+            {
+                var storedHash = reader.GetString(0);
+                var response = NullableString(reader, 1);
+                reader.Close();
+                transaction.Commit();
+                if (storedHash != requestHash) return new ToolCallBegin(ToolCallBeginKind.Conflict, null, null);
+                if (response is not null) return new ToolCallBegin(ToolCallBeginKind.Replay, JsonNode.Parse(response)!.AsObject(), null);
+                return new ToolCallBegin(ToolCallBeginKind.Resume, null, status == RunStatus.Running ? null : LedgerReasonCode.RunNotActive);
+            }
+        }
+
+        long counted;
+        using (var count = new NpgsqlCommand("SELECT count(*) FROM tool_calls WHERE run_id = @run_id", connection, transaction))
+        {
+            count.Parameters.AddWithValue("run_id", runId);
+            counted = (long)count.ExecuteScalar()!;
+        }
+        using (var insert = new NpgsqlCommand(
+            "INSERT INTO tool_calls (id, run_id, tool_call_id, tool_name, arguments_redacted, request_hash) " +
+            "VALUES (@id, @run_id, @call_id, @tool, @arguments, @hash)", connection, transaction))
+        {
+            insert.Parameters.AddWithValue("id", Guid.NewGuid());
+            insert.Parameters.AddWithValue("run_id", runId);
+            insert.Parameters.AddWithValue("call_id", toolCallId);
+            insert.Parameters.AddWithValue("tool", tool);
+            insert.Parameters.AddWithValue("arguments", NpgsqlDbType.Jsonb, redactedArguments.ToJsonString());
+            insert.Parameters.AddWithValue("hash", requestHash);
+            insert.ExecuteNonQuery();
+        }
+        AppendEvent(connection, transaction, runId, FinanceEvents.ToolCallProposed(toolCallId, tool, redactedArguments));
+
+        LedgerReasonCode? denial = null;
+        if (status != RunStatus.Running)
+        {
+            denial = LedgerReasonCode.RunNotActive;
+        }
+        else
+        {
+            using var read = new NpgsqlCommand("SELECT config_snapshot::text FROM experiment_runs WHERE id = @id", connection, transaction);
+            read.Parameters.AddWithValue("id", runId);
+            var snapshot = JsonNode.Parse((string)read.ExecuteScalar()!)!.AsObject();
+            if (counted >= AgentGatewayRules.MaxActions(snapshot))
+            {
+                denial = LedgerReasonCode.ActionBudgetExceeded;
+                UpdateRunStatus(connection, transaction, runId, RunStatus.BudgetExceeded, AgentGatewayRules.BudgetExhaustedReason);
+                RevokeSessions(connection, transaction, runId);
+                AppendEvent(connection, transaction, runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ToolCall,
+                    RunStatus.Running, RunStatus.BudgetExceeded, AgentGatewayRules.BudgetExhaustedReason, FinanceEvents.GatewaySource)
+                    with { TraceId = toolCallId });
+            }
+        }
+        transaction.Commit();
+        return new ToolCallBegin(ToolCallBeginKind.New, null, denial);
+    }
+
+    // Stores the result and TOOL_RETURNED (plus any agent event such as FUNDING_REQUESTED) in one transaction.
+    public void CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion)
+    {
+        using var connection = dataSource.OpenConnection();
+        using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+        LockExistingRun(connection, transaction, runId);
+        using var update = new NpgsqlCommand(
+            "UPDATE tool_calls SET outcome = @outcome, reason_code = @reason, journal_id = @journal, response = @response, " +
+            "completed_at = now() WHERE run_id = @run_id AND tool_call_id = @id AND completed_at IS NULL", connection, transaction);
+        update.Parameters.AddWithValue("outcome", completion.Status);
+        update.Parameters.AddWithValue("reason", NpgsqlDbType.Text, (object?)completion.ReasonCode ?? DBNull.Value);
+        update.Parameters.AddWithValue("journal", NpgsqlDbType.Uuid, (object?)completion.JournalId ?? DBNull.Value);
+        update.Parameters.AddWithValue("response", NpgsqlDbType.Jsonb, completion.Response.ToJsonString());
+        update.Parameters.AddWithValue("run_id", runId);
+        update.Parameters.AddWithValue("id", toolCallId);
+        if (update.ExecuteNonQuery() == 1)
+        {
+            if (completion.ExtraEvent is { } extra) AppendEvent(connection, transaction, runId, extra);
+            AppendEvent(connection, transaction, runId,
+                FinanceEvents.ToolReturned(toolCallId, tool, completion.Status, completion.ReasonCode, completion.JournalId));
+        }
+        transaction.Commit();
+    }
+
+    public AgentView GetAgentView(Guid runId)
+    {
+        using var connection = dataSource.OpenConnection();
+        Guid? cash = null, savings = null;
+        var merchants = new List<AgentMerchant>();
+        using (var accounts = new NpgsqlCommand("SELECT id, kind, scenario_key, label FROM accounts WHERE run_id = @run_id", connection))
+        {
+            accounts.Parameters.AddWithValue("run_id", runId);
+            using var reader = accounts.ExecuteReader();
+            while (reader.Read())
+            {
+                var kind = FromDatabaseValue<AccountKind>(reader.GetString(1));
+                if (kind == AccountKind.AgentCash) cash = reader.GetGuid(0);
+                else if (kind == AccountKind.AgentSavings) savings ??= reader.GetGuid(0);
+                else if (!reader.IsDBNull(2)) merchants.Add(new AgentMerchant(reader.GetGuid(0), reader.GetString(2), reader.GetString(3)));
+            }
+        }
+        if (cash is null) throw new LedgerValidationException(LedgerReasonCode.RunNotActive, "Run has no agent account.");
+
+        var obligations = new List<ObligationResult>();
+        using (var command = new NpgsqlCommand(
+            "SELECT id, merchant_account_id, amount_sen, paid, invoice_reference, due_day, label FROM obligations WHERE run_id = @run_id",
+            connection))
+        {
+            command.Parameters.AddWithValue("run_id", runId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                obligations.Add(new ObligationResult(reader.GetGuid(0), reader.GetGuid(1), reader.GetInt64(2), reader.GetBoolean(3),
+                    reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetInt32(5), NullableString(reader, 6)));
+        }
+        return new AgentView(cash.Value, savings, merchants.OrderBy(m => m.Key, StringComparer.Ordinal).ToArray(),
+            AgentGatewayRules.Order(obligations));
+    }
+
     private static void UpdateRunStatus(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, RunStatus to, string? reason)
     {
         using var update = new NpgsqlCommand(
@@ -727,7 +912,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         using var connection = dataSource.OpenConnection();
         using var command = new NpgsqlCommand(
             "SELECT sequence, event_type, event_version, occurred_at, source, operation, outcome, reason_code, " +
-            "idempotency_key, journal_id, obligation_id, payload::text, encode(event_hash, 'hex'), virtual_time " +
+            "idempotency_key, journal_id, obligation_id, payload::text, encode(event_hash, 'hex'), virtual_time, trace_id " +
             "FROM run_events WHERE run_id = @run_id AND sequence > @after ORDER BY sequence LIMIT @limit", connection);
         command.Parameters.AddWithValue("run_id", runId);
         command.Parameters.AddWithValue("after", afterSequence);
@@ -742,7 +927,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                 NullableString(reader, 5), NullableString(reader, 6), NullableString(reader, 7), NullableString(reader, 8),
                 reader.IsDBNull(9) ? null : reader.GetGuid(9), reader.IsDBNull(10) ? null : reader.GetGuid(10),
                 JsonNode.Parse(reader.GetString(11))!.AsObject(), reader.GetString(12),
-                reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTimeOffset>(13)));
+                reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTimeOffset>(13), NullableString(reader, 14)));
         }
         return events;
     }
@@ -799,11 +984,13 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
     // Sequence, prev_hash, occurred_at, and event_hash are assigned by the database trigger.
     private static void AppendEvent(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, PendingEvent pending)
     {
+        pending = pending.WithCallContext();
         using var command = new NpgsqlCommand(
             "INSERT INTO run_events (id, run_id, sequence, event_type, event_version, occurred_at, source, operation, " +
-            "outcome, reason_code, idempotency_key, journal_id, obligation_id, payload, event_hash) " +
+            "outcome, reason_code, idempotency_key, journal_id, obligation_id, payload, event_hash, trace_id) " +
             "VALUES (@id, @run_id, 0, @event_type, @event_version, now(), @source, @operation, @outcome, @reason_code, " +
-            "@idempotency_key, @journal_id, @obligation_id, @payload, '\\x00'::bytea)", connection, transaction);
+            "@idempotency_key, @journal_id, @obligation_id, @payload, '\\x00'::bytea, @trace_id)", connection, transaction);
+        command.Parameters.AddWithValue("trace_id", NpgsqlDbType.Text, (object?)pending.TraceId ?? DBNull.Value);
         command.Parameters.AddWithValue("id", Guid.NewGuid());
         command.Parameters.AddWithValue("run_id", runId);
         command.Parameters.AddWithValue("event_type", pending.EventType);

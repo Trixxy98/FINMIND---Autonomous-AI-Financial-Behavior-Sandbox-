@@ -69,6 +69,13 @@ with an unreversed payment. Reversing a bill payment returns the
 obligation to unpaid in the same transaction. The agent has no reversal
 tool.
 
+`infra/db/migrations/010_worker_and_tool_gateway.sql` adds run sessions
+(only token hashes are stored) and append-only tool-call records
+(ADR-0009). The gateway resolves the run and the agent's accounts from the
+session, validates arguments strictly, allowlists transfer destinations,
+enforces the action budget, and links every finance event caused by a
+tool call to it through `trace_id`.
+
 `infra/db/migrations/009_scenarios_and_clock.sql` adds materialized scenario
 schedules and the per-run virtual clock (ADR-0010). Scenario files in
 `scenarios/` are validated at API startup. Activation stores the seeded

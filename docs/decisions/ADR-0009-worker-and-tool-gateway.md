@@ -1,6 +1,6 @@
 # FINMIND ADR 0009: Worker Process and Agent Tool Gateway
 
-- Status: Proposed
+- Status: Implemented for Phase 2 local API (the Python worker loop arrives with ADR-0011)
 - Date: 21 November 2026
 - Scope: Phase 2 — how the agent runtime authenticates, claims runs, and calls allowlisted tools
 
@@ -209,6 +209,51 @@ Model messages and token usage are runtime events defined in ADR-0011.
 | `INVALID_TOOL_ARGUMENTS` | malformed |
 | `ACTION_BUDGET_EXCEEDED` | denied |
 | `TOOL_CALL_ID_CONFLICT` | conflict |
+
+## Implementation notes
+
+- Migration: `infra/db/migrations/010_worker_and_tool_gateway.sql`.
+- Code: `apps/api/Finance/ToolGateway.cs` (sessions, execution, fixed
+  messages, redaction), `ToolCatalog.cs` (strict schemas),
+  `AgentGatewayTypes.cs`; gateway-support methods on both ledgers
+  (`ClaimQueuedRun`, `ResolveSession`, `BeginToolCall`, `CompleteToolCall`,
+  `GetAgentView`). Worker routes in `apps/api/Program.cs`.
+- Activation now also creates the agent's savings account.
+- Event sources: `worker` for lifecycle changes made through the worker
+  interface, `gateway` for the automatic move to `BUDGET_EXCEEDED`, and
+  `agent` for tool-call events and every finance event caused by a tool
+  call (with `trace_id` = `toolCallId`).
+- `list_obligations` also returns the allowlisted payees
+  (`destination_id`, `label`), so the agent can discover transfer
+  destinations.
+- `transfer_funds` destinations that are not visible scenario merchants are
+  rejected by the gateway (`ACCOUNT_KIND_NOT_PERMITTED` for the agent's own
+  accounts, otherwise `ACCOUNT_NOT_IN_RUN`). These rejections appear in
+  `TOOL_RETURNED` and the tool-call record, not as ledger `POLICY_DENIED`
+  events, because the ledger is never called.
+- `wait` returns `status: ok` with `data.duration_reached`, rather than a
+  separate status value.
+- `INVALID_TOOL_ARGUMENTS` responses list the invalid field names in
+  `data.fields`.
+- Retries: "same request" means the same tool name and the same argument
+  JSON text. A recorded but incomplete call (crash between recording and
+  completion) is executed again on retry; money tools are idempotent through
+  the agent's key, and record-only tools write their event together with the
+  completion, so neither duplicates an effect. A `TOOL_CALL_ID_CONFLICT`
+  response is not stored.
+- Internal errors are not stored as tool results. The API returns HTTP 500
+  and the worker retries the same `toolCallId`.
+- Transport errors: invalid `toolCallId` or body shape → HTTP 400; body over
+  16 KB → HTTP 413; bad or missing session → HTTP 401.
+- Worker credentials are compared as SHA-256 hashes with a fixed-time
+  comparison. Worker routes are not mapped unless `FINMIND_WORKER_TOKEN` has
+  at least 32 characters; the API logs a warning instead.
+- Whether the unavailable-capability catalog is described to the agent is a
+  runtime prompt choice (ADR-0011); the claim response lists it.
+- Tests: `ToolGatewayTests` (all tools, allowlisting, trace chain, unsupported
+  and invalid calls, redaction, action budget, session expiry and
+  revocation, resume after a crash, concurrent claims, database protection,
+  restricted role).
 
 ## Security notes
 

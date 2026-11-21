@@ -14,7 +14,7 @@ public static class LedgerHttpResponses
     {
         LedgerOutcome.Committed or LedgerOutcome.Replayed => 200,
         LedgerOutcome.Malformed => 400,
-        LedgerOutcome.Denied => 422,
+        LedgerOutcome.Denied or LedgerOutcome.UnsupportedCapability => 422,
         LedgerOutcome.Conflict => 409,
         _ => 500
     };
