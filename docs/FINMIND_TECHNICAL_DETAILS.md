@@ -69,6 +69,11 @@ with an unreversed payment. Reversing a bill payment returns the
 obligation to unpaid in the same transaction. The agent has no reversal
 tool.
 
+`infra/db/migrations/007_run_event_lock_order.sql` makes event sequence
+assignment lock the run row, so every writer takes locks in the same order
+(run row, then sequence) and event-only writes cannot deadlock with
+finance operations.
+
 `infra/db/migrations/006_run_events.sql` adds the append-only `run_events`
 log (ADR-0007). Successful finance operations write their events in the
 same transaction as the ledger change; rejections are recorded as
@@ -76,6 +81,27 @@ same transaction as the ledger change; rejections are recorded as
 each event's per-run sequence and SHA-256 hash link;
 `finmind_verify_run_events(run_id)` detects a broken chain. Tool-call,
 model, and scenario events arrive with the Phase 2 runtime.
+
+### Phase 1 gate status (21 November 2026)
+
+The Phase 1 exit criteria are covered by tests that run against both
+ledgers, plus PostgreSQL-only integrity, permission, and concurrency
+tests: every committed journal balances; rejected operations leave
+balances, journals, and obligations unchanged; retries have at most one
+economic effect; balances reconcile to postings.
+
+`Phase1GateTests` adds concurrent double-payment, payment-versus-reversal
+races, extreme amounts, and seeded random operation sequences. The random
+sequences check invariants after every step and, with PostgreSQL, require
+both ledgers to return the same outcome for every operation.
+
+Balances have no separate projection table in Phase 1. They are computed
+from postings on each read, so reconciliation holds by construction. A
+materialized projection, if needed for performance, must be reconciled
+against postings.
+
+Deferred by plan: authentication and RBAC, tool grants, action/token/time
+budgets, run lifecycle, read-only replay, and export.
 
 ### Commit procedure
 1. Authenticate trusted caller and resolve scoped run principal server-side.

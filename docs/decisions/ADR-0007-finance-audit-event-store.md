@@ -197,17 +197,26 @@ Rules:
   using the same mechanism as journals (ADR-0001).
 - `finmind_api` gets SELECT and INSERT only. No UPDATE, DELETE, TRUNCATE.
 - A `BEFORE INSERT` trigger:
-  1. Takes a per-run transaction-level advisory lock so sequence
-     assignment is serialized even for writers that do not hold the run
-     row lock.
+  1. Locks the run row (`SELECT ... FOR UPDATE`), so sequence assignment
+     is serialized for every writer, including event-only transactions.
+     This is re-entrant for finance operations that already hold it.
   2. Sets `sequence = previous max + 1` and `prev_hash = previous
      event_hash` for the run.
   3. Sets `occurred_at = now()`.
   4. Computes `event_hash` (below).
   Values supplied by the caller for these columns are ignored.
 
-The existing run-row lock already serializes finance operations per run;
-the advisory lock covers event-only transactions and future writers.
+Lock order is always: run row, then sequence assignment.
+
+Amendment (migration `007_run_event_lock_order.sql`, 21 November 2026):
+migration 006 used a per-run advisory lock here instead. The Phase 1
+gate's race test (a new payment racing the reversal of the old payment)
+found a deadlock: the reversal held the run row and waited for the
+advisory lock, while the event-only `POLICY_DENIED` transaction held the
+advisory lock and waited for the run row in its foreign key check.
+PostgreSQL aborted the denial write, so the API would have returned
+`internal_error`. Migration 007 replaces the advisory lock with the run
+row lock so every writer uses the same order.
 
 ## Hash canonicalization (v1)
 

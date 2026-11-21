@@ -25,7 +25,8 @@ Phase 0 scaffold is in place. Phase 1 has a PostgreSQL-backed C# ledger for the 
    `infra/db/migrations/003_obligation_invoice_identity.sql`,
    `infra/db/migrations/004_api_database_role.sql`,
    `infra/db/migrations/005_journal_reversal.sql`,
-   and `infra/db/migrations/006_run_events.sql`.
+   `infra/db/migrations/006_run_events.sql`,
+   and `infra/db/migrations/007_run_event_lock_order.sql`.
    Then set the restricted API role password interactively (the role is cluster-wide, so do this once):
    `docker compose -f infra/compose.yaml exec postgres psql -U finmind -d finmind -c "\password finmind_api"`.
    Use the same value as `Password=` in `ConnectionStrings__Finmind` and `FINMIND_API_TEST_DATABASE` in `.env`.
