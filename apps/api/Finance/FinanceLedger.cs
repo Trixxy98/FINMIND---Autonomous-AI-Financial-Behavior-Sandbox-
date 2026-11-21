@@ -37,6 +37,10 @@ public interface IFinanceLedger
     long GetBalance(Guid runId, Guid accountId);
     IReadOnlyList<LedgerJournal> GetJournals(Guid runId);
     IReadOnlyList<RunEvent> GetEvents(Guid runId, long afterSequence, int limit);
+    RunInfo CreateManagedRun(JsonObject? config, string? codeRevision);
+    RunInfo GetRun(Guid runId);
+    RunInfo TransitionRun(Guid runId, RunStatus to, string? reason, string source);
+    OpenRunResult ActivateRun(Guid runId, string source);
 }
 
 public static class RunEventPaging
@@ -170,6 +174,18 @@ public sealed class InMemoryLedger : IFinanceLedger
     private readonly Dictionary<Guid, long> _runTransactionLimits = [];
     private readonly Dictionary<Guid, List<RunEvent>> _events = [];
     private List<PendingEvent>? _pending;
+    private readonly Dictionary<Guid, ManagedRun> _managedRuns = [];
+
+    private sealed class ManagedRun(JsonObject snapshot, string hash)
+    {
+        public RunStatus Status = RunStatus.Draft;
+        public string? Reason;
+        public JsonObject Snapshot { get; } = snapshot;
+        public string Hash { get; } = hash;
+        public DateTimeOffset? QueuedAt, StartedAt, FinishedAt;
+    }
+
+    private RunStatus? StatusOf(Guid runId) => _managedRuns.TryGetValue(runId, out var run) ? run.Status : null;
 
     public Guid CreateAccount(Guid runId, AccountKind kind) =>
         Record(FinanceEvents.Operations.CreateAccount, runId, FinanceEvents.Request(("kind", kind)),
@@ -179,6 +195,7 @@ public sealed class InMemoryLedger : IFinanceLedger
     {
         if (runId == Guid.Empty) throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID is required.");
         if (!Enum.IsDefined(kind)) throw new LedgerValidationException(LedgerReasonCode.UnsupportedAccountKind, "Unsupported account kind.");
+        RunLifecycle.EnsureActive(StatusOf(runId), RunLifecycle.Setup);
         var id = Guid.NewGuid();
         _accounts.Add(id, new Account(runId, kind));
         _balances.Add(id, 0);
@@ -193,13 +210,29 @@ public sealed class InMemoryLedger : IFinanceLedger
         long transactionLimitSen) =>
         Record(FinanceEvents.Operations.OpenRun, runId,
             FinanceEvents.Request(("idempotencyKey", idempotencyKey), ("openingBalanceSen", openingBalanceSen), ("transactionLimitSen", transactionLimitSen)),
-            FinanceEvents.InternalApiSource, () => OpenRunCore(runId, idempotencyKey, openingBalanceSen, transactionLimitSen));
+            FinanceEvents.InternalApiSource, () =>
+            {
+                ValidateOpenRun(runId, idempotencyKey, openingBalanceSen, transactionLimitSen);
+                // ADR-0008: managed runs are funded only by activation, from their snapshot.
+                if (_managedRuns.ContainsKey(runId))
+                    throw new LedgerValidationException(LedgerReasonCode.RunNotActive, "Managed runs are funded only by activation.");
+                return OpenRunCore(runId, idempotencyKey, openingBalanceSen, transactionLimitSen, FinanceEvents.Operations.OpenRun);
+            });
+
+    private static void ValidateOpenRun(Guid runId, string idempotencyKey, long openingBalanceSen, long transactionLimitSen)
+    {
+        if (runId == Guid.Empty || string.IsNullOrWhiteSpace(idempotencyKey))
+            throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID and idempotency key are required.");
+        if (openingBalanceSen <= 0 || transactionLimitSen <= 0)
+            throw new LedgerValidationException(LedgerReasonCode.InvalidAmount, "Opening balance and transaction limit must be positive sen.");
+    }
 
     private OpenRunResult OpenRunCore(
         Guid runId,
         string idempotencyKey,
         long openingBalanceSen,
-        long transactionLimitSen)
+        long transactionLimitSen,
+        string operation)
     {
         if (runId == Guid.Empty || string.IsNullOrWhiteSpace(idempotencyKey))
             throw new LedgerValidationException(
@@ -244,7 +277,7 @@ public sealed class InMemoryLedger : IFinanceLedger
                         "Run has already been initialized with a different opening allocation.");
                 }
 
-                Emit(FinanceEvents.LedgerReplayed(FinanceEvents.Operations.OpenRun,
+                Emit(FinanceEvents.LedgerReplayed(operation,
                     new CommitResult(existing.JournalId, true, true), idempotencyKey));
                 return new OpenRunResult(
                     existing.JournalId, true, true, cashPosting.AccountId);
@@ -258,8 +291,8 @@ public sealed class InMemoryLedger : IFinanceLedger
             if (!hasPolicy)
                 Emit(FinanceEvents.RunCreated(transactionLimitSen));
             var treasuryId = CreateAccountCore(
-                runId, AccountKind.SimulatorTreasury, FinanceEvents.Operations.OpenRun);
-            var cashId = CreateAccountCore(runId, AccountKind.AgentCash, FinanceEvents.Operations.OpenRun);
+                runId, AccountKind.SimulatorTreasury, operation);
+            var cashId = CreateAccountCore(runId, AccountKind.AgentCash, operation);
 
             _runTransactionLimits[runId] = transactionLimitSen;
 
@@ -275,7 +308,7 @@ public sealed class InMemoryLedger : IFinanceLedger
                     [
                         new(treasuryId, checked(-openingBalanceSen)),
                         new(cashId, openingBalanceSen)
-                    ]), FinanceEvents.Operations.OpenRun);
+                    ]), operation, activation: true);
             }
             catch
             {
@@ -306,11 +339,12 @@ public sealed class InMemoryLedger : IFinanceLedger
             FinanceEvents.InternalApiSource, () => CommitCore(request, FinanceEvents.Operations.Commit));
     }
 
-    private CommitResult CommitCore(JournalRequest request, string operation)
+    private CommitResult CommitCore(JournalRequest request, string operation, bool activation = false)
     {
         {
             // Check order mirrors PostgresLedger so both return the same reason code.
             ValidateRequestFields(request);
+            if (!activation) RunLifecycle.EnsureActive(StatusOf(request.RunId), RunLifecycle.MoneyMovement);
 
             if (!_runTransactionLimits.TryGetValue(
                     request.RunId, out var transactionLimitSen))
@@ -466,6 +500,7 @@ public sealed class InMemoryLedger : IFinanceLedger
     private ObligationResult CreateObligationCore(Guid runId, Guid merchantAccountId, long amountSen, string invoiceReference)
     {
         ValidateObligationRequest(runId, merchantAccountId, amountSen, invoiceReference);
+        RunLifecycle.EnsureActive(StatusOf(runId), RunLifecycle.Setup);
 
         {
             var invoiceKey = (runId, invoiceReference);
@@ -540,6 +575,7 @@ public sealed class InMemoryLedger : IFinanceLedger
 
     private CommitResult PayObligationCore(Guid runId, string idempotencyKey, Guid cashAccountId, Guid obligationId)
     {
+        RunLifecycle.EnsureActive(StatusOf(runId), RunLifecycle.MoneyMovement);
         {
             if (!_obligations.TryGetValue(obligationId, out var obligation) || obligation.RunId != runId)
                 throw new LedgerValidationException(LedgerReasonCode.ObligationNotFound, "Obligation not found in this run.");
@@ -577,6 +613,7 @@ public sealed class InMemoryLedger : IFinanceLedger
     private CommitResult ReverseJournalCore(Guid runId, string idempotencyKey, Guid originalJournalId, string reason, ReversalInitiator initiator)
     {
         LedgerRequestValidation.ValidateReversal(runId, idempotencyKey, originalJournalId, reason, initiator);
+        RunLifecycle.EnsureActive(StatusOf(runId), RunLifecycle.MoneyMovement);
 
         {
             if (_journalsByKey.TryGetValue((runId, idempotencyKey), out var existing))
@@ -625,6 +662,85 @@ public sealed class InMemoryLedger : IFinanceLedger
         }
     }
 
+    public RunInfo CreateManagedRun(JsonObject? config, string? codeRevision)
+    {
+        var runId = Guid.NewGuid();
+        Record(FinanceEvents.Operations.CreateRun, runId, new JsonObject(), FinanceEvents.InternalApiSource, () =>
+        {
+            var snapshot = RunConfiguration.Validate(config, codeRevision);
+            var run = new ManagedRun(snapshot, RunConfiguration.InMemoryHash(snapshot));
+            _managedRuns.Add(runId, run);
+            _runTransactionLimits[runId] = RunConfiguration.TransactionLimit(snapshot);
+            Emit(FinanceEvents.ManagedRunCreated(snapshot, run.Hash));
+            return true;
+        });
+        return GetRun(runId);
+    }
+
+    public RunInfo GetRun(Guid runId)
+    {
+        lock (_gate)
+        {
+            if (_managedRuns.TryGetValue(runId, out var run))
+                return new RunInfo(runId, true, RunLifecycle.Wire(run.Status), run.Reason, (JsonObject)run.Snapshot.DeepClone(),
+                    run.Hash, run.QueuedAt, run.StartedAt, run.FinishedAt);
+            if (_runTransactionLimits.ContainsKey(runId))
+                return new RunInfo(runId, false, null, null, null, null, null, null, null);
+            throw new LedgerValidationException(LedgerReasonCode.RunNotFound, "Run does not exist.");
+        }
+    }
+
+    public RunInfo TransitionRun(Guid runId, RunStatus to, string? reason, string source)
+    {
+        Record(FinanceEvents.Operations.TransitionRun, runId,
+            FinanceEvents.Request(("to", RunLifecycle.Wire(to)), ("reason", reason)), source, () =>
+            {
+                if (runId == Guid.Empty) throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID is required.");
+                var storedReason = RunLifecycle.NormalizeReason(to, reason);
+                var from = RequireRun(runId);
+                RunLifecycle.EnsureTransition(from, to);
+                if (to == RunStatus.Running)
+                    throw new IdempotencyConflictException(LedgerReasonCode.InvalidRunTransition, "Runs enter RUNNING only through activation.");
+                SetStatus(runId, to, storedReason);
+                Emit(FinanceEvents.RunStatusChanged(FinanceEvents.Operations.TransitionRun, from!.Value, to, storedReason, source));
+                return true;
+            });
+        return GetRun(runId);
+    }
+
+    public OpenRunResult ActivateRun(Guid runId, string source) =>
+        Record(FinanceEvents.Operations.ActivateRun, runId, new JsonObject(), source, () =>
+        {
+            if (runId == Guid.Empty) throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID is required.");
+            var from = RequireRun(runId);
+            RunLifecycle.EnsureTransition(from, RunStatus.Running);
+            var snapshot = _managedRuns[runId].Snapshot;
+            var opening = OpenRunCore(runId, RunLifecycle.OpeningIdempotencyKey, RunConfiguration.StartingBalance(snapshot),
+                RunConfiguration.TransactionLimit(snapshot), FinanceEvents.Operations.ActivateRun);
+            SetStatus(runId, RunStatus.Running, null);
+            Emit(FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ActivateRun, from!.Value, RunStatus.Running, null, source));
+            return opening;
+        });
+
+    // Mirrors PostgresLedger.LockExistingRun: unknown → RUN_NOT_FOUND; legacy → null status.
+    private RunStatus? RequireRun(Guid runId)
+    {
+        if (_managedRuns.TryGetValue(runId, out var run)) return run.Status;
+        if (_runTransactionLimits.ContainsKey(runId)) return null;
+        throw new LedgerValidationException(LedgerReasonCode.RunNotFound, "Run does not exist.");
+    }
+
+    private void SetStatus(Guid runId, RunStatus to, string? reason)
+    {
+        var run = _managedRuns[runId];
+        var now = DateTimeOffset.UtcNow;
+        run.Status = to;
+        run.Reason = reason;
+        if (to == RunStatus.Queued) run.QueuedAt = now;
+        if (to == RunStatus.Running) run.StartedAt = now;
+        if (to is RunStatus.Completed or RunStatus.Failed or RunStatus.Cancelled or RunStatus.BudgetExceeded) run.FinishedAt = now;
+    }
+
     // ADR-0007: an operation's events are buffered and stored only if it succeeds; a rejection stores POLICY_DENIED instead.
     private T Record<T>(string operation, Guid runId, JsonObject request, string source, Func<T> body)
     {
@@ -665,7 +781,7 @@ public sealed class InMemoryLedger : IFinanceLedger
     {
         if (!_runTransactionLimits.ContainsKey(runId)) return;
         if (!_events.TryGetValue(runId, out var events)) _events[runId] = events = [];
-        events.Add(new RunEvent(runId, events.Count + 1, pending.EventType, FinanceEvents.Version, DateTimeOffset.UtcNow,
+        events.Add(new RunEvent(runId, events.Count + 1, pending.EventType, pending.EventVersion, DateTimeOffset.UtcNow,
             pending.Source, pending.Operation, pending.Outcome, pending.ReasonCode, pending.IdempotencyKey,
             pending.JournalId, pending.ObligationId, (JsonObject)pending.Payload.DeepClone(), null));
     }

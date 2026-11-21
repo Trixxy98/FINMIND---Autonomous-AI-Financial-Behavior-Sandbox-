@@ -69,6 +69,13 @@ with an unreversed payment. Reversing a bill payment returns the
 obligation to unpaid in the same transaction. The agent has no reversal
 tool.
 
+`infra/db/migrations/008_run_lifecycle.sql` adds managed runs (ADR-0008):
+an immutable JSONB configuration snapshot with a SHA-256 hash, a status
+column with a database-enforced transition table, and trigger-owned
+timestamps. Money-moving operations on a managed run require `RUNNING`;
+opening funds come only from the snapshot through activation. Runs with
+NULL status are unmanaged Phase 1 runs.
+
 `infra/db/migrations/007_run_event_lock_order.sql` makes event sequence
 assignment lock the run row, so every writer takes locks in the same order
 (run row, then sequence) and event-only writes cannot deadlock with

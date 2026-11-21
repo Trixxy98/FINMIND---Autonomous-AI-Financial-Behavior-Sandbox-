@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Finmind.Api.Finance;
 using Npgsql;
 
@@ -55,6 +56,25 @@ app.MapGet("/health", (NpgsqlDataSource dataSource) =>
         return Results.Json(new { status = "unavailable", service = "finmind-api", database = "unavailable" }, statusCode: 503);
     }
 });
+
+// ADR-0008: managed runs. Researcher endpoints only start and cancel; runtime transitions use the worker interface (ADR-0009).
+var codeRevision = builder.Configuration["FINMIND_CODE_REVISION"];
+
+app.MapPost("/internal/runs", (JsonObject? config, PostgresLedger ledger) =>
+    Execute(() =>
+    {
+        var run = ledger.CreateManagedRun(config, codeRevision);
+        return Results.Created($"/internal/runs/{run.RunId}", run);
+    }));
+
+app.MapGet("/internal/runs/{runId:guid}", (Guid runId, PostgresLedger ledger) =>
+    Execute(() => Results.Ok(ledger.GetRun(runId)), isRead: true));
+
+app.MapPost("/internal/runs/{runId:guid}/start", (Guid runId, PostgresLedger ledger) =>
+    Execute(() => Results.Ok(ledger.TransitionRun(runId, RunStatus.Queued, null, "internal_api"))));
+
+app.MapPost("/internal/runs/{runId:guid}/cancel", (Guid runId, CancelRunRequest request, PostgresLedger ledger) =>
+    Execute(() => Results.Ok(ledger.TransitionRun(runId, RunStatus.Cancelled, request.Reason, "internal_api"))));
 
 app.MapPost("/internal/runs/{runId:guid}/accounts", (Guid runId, CreateAccountRequest request, PostgresLedger ledger) =>
 {
@@ -135,5 +155,6 @@ internal sealed record FundingRequest(string IdempotencyKey, long AmountSen, lon
 internal sealed record TransferRequest(string IdempotencyKey, Guid SourceAccountId, Guid DestinationAccountId, long AmountSen);
 internal sealed record SavingsRequest(string IdempotencyKey, Guid CashAccountId, Guid SavingsAccountId, long AmountSen);
 internal sealed record BillPaymentRequest(string IdempotencyKey, Guid CashAccountId, Guid ObligationId);
+internal sealed record CancelRunRequest(string? Reason);
 internal sealed record ReversalRequest(string IdempotencyKey, string Reason);
 internal sealed record CreateObligationRequest(Guid MerchantAccountId, long AmountSen, string InvoiceReference);

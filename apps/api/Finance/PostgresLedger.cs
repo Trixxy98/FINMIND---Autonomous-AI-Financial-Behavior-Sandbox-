@@ -18,7 +18,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
 
         using var connection = dataSource.OpenConnection();
         using var transaction = connection.BeginTransaction();
-        LockExistingRun(connection, transaction, runId);
+        RunLifecycle.EnsureActive(LockExistingRun(connection, transaction, runId), RunLifecycle.Setup);
         if (GetRunTransactionLimit(connection, transaction, runId) is null)
             throw new LedgerValidationException(LedgerReasonCode.RunPolicyNotConfigured, "Run transaction policy is not configured.");
 
@@ -44,8 +44,19 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         using var connection = dataSource.OpenConnection();
         using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
         var runCreated = EnsureRun(connection, transaction, runId, transactionLimitSen);
-        LockRun(connection, transaction, runId);
+        // ADR-0008: managed runs are funded only by activation, from their snapshot.
+        if (LockRun(connection, transaction, runId) is not null)
+            throw new LedgerValidationException(LedgerReasonCode.RunNotActive, "Managed runs are funded only by activation.");
 
+        var result = OpenRunWithinTransaction(connection, transaction, runId, idempotencyKey, openingBalanceSen,
+            transactionLimitSen, runCreated, FinanceEvents.Operations.OpenRun);
+        transaction.Commit();
+        return result;
+    }
+
+    private static OpenRunResult OpenRunWithinTransaction(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        Guid runId, string idempotencyKey, long openingBalanceSen, long transactionLimitSen, bool runCreated, string operation)
+    {
         var configuredLimit = GetRunTransactionLimit(connection, transaction, runId);
         if (configuredLimit is null)
         {
@@ -74,8 +85,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                 throw new IdempotencyConflictException(LedgerReasonCode.RunPolicyConflict, "Run has already been initialized with a different opening allocation.");
 
             AppendEvent(connection, transaction, runId, FinanceEvents.LedgerReplayed(
-                FinanceEvents.Operations.OpenRun, new CommitResult(existingOpening.Value.JournalId, true, true), idempotencyKey));
-            transaction.Commit();
+                operation, new CommitResult(existingOpening.Value.JournalId, true, true), idempotencyKey));
             return new OpenRunResult(existingOpening.Value.JournalId, true, true, existingOpening.Value.CashAccountId);
         }
 
@@ -92,12 +102,11 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             idempotencyKey, "authorized virtual opening allocation");
         InsertPosting(connection, transaction, journalId, runId, treasuryId, negativeAmount);
         InsertPosting(connection, transaction, journalId, runId, cashId, openingBalanceSen);
-        AppendEvent(connection, transaction, runId, FinanceEvents.AccountCreated(FinanceEvents.Operations.OpenRun, treasuryId, AccountKind.SimulatorTreasury));
-        AppendEvent(connection, transaction, runId, FinanceEvents.AccountCreated(FinanceEvents.Operations.OpenRun, cashId, AccountKind.AgentCash));
-        AppendEvent(connection, transaction, runId, FinanceEvents.LedgerCommitted(FinanceEvents.Operations.OpenRun,
+        AppendEvent(connection, transaction, runId, FinanceEvents.AccountCreated(operation, treasuryId, AccountKind.SimulatorTreasury));
+        AppendEvent(connection, transaction, runId, FinanceEvents.AccountCreated(operation, cashId, AccountKind.AgentCash));
+        AppendEvent(connection, transaction, runId, FinanceEvents.LedgerCommitted(operation,
             new LedgerJournal(journalId, runId, idempotencyKey, JournalKind.OpeningFunding, "authorized virtual opening allocation",
                 [new(treasuryId, negativeAmount), new(cashId, openingBalanceSen)])));
-        transaction.Commit();
 
         return new OpenRunResult(journalId, true, false, cashId);
     }
@@ -182,7 +191,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         using var transaction = connection.BeginTransaction(
             IsolationLevel.ReadCommitted);
 
-        LockExistingRun(connection, transaction, runId);
+        RunLifecycle.EnsureActive(LockExistingRun(connection, transaction, runId), RunLifecycle.Setup);
 
         if (GetRunTransactionLimit(connection, transaction, runId) is null)
             throw new LedgerValidationException(
@@ -322,7 +331,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
     {
         using var connection = dataSource.OpenConnection();
         using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
-        LockExistingRun(connection, transaction, runId);
+        RunLifecycle.EnsureActive(LockExistingRun(connection, transaction, runId), RunLifecycle.MoneyMovement);
 
         using var obligationCommand = new NpgsqlCommand(
             "SELECT merchant_account_id, amount_sen, paid FROM obligations " +
@@ -378,7 +387,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
 
         using var connection = dataSource.OpenConnection();
         using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
-        LockExistingRun(connection, transaction, runId);
+        RunLifecycle.EnsureActive(LockExistingRun(connection, transaction, runId), RunLifecycle.MoneyMovement);
 
         var existing = LoadJournalByKey(connection, transaction, runId, idempotencyKey);
         if (existing is not null)
@@ -448,6 +457,99 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             AppendEvent(connection, transaction, runId, FinanceEvents.ObligationPaymentReversed(reversal));
         transaction.Commit();
         return new CommitResult(reversalId, true, false);
+    }
+
+    // ADR-0008: create a managed run in DRAFT from a validated, immutable snapshot.
+    public RunInfo CreateManagedRun(JsonObject? config, string? codeRevision)
+    {
+        var runId = Guid.NewGuid();
+        Record(FinanceEvents.Operations.CreateRun, runId, new JsonObject(), FinanceEvents.InternalApiSource, () =>
+        {
+            var snapshot = RunConfiguration.Validate(config, codeRevision);
+            using var connection = dataSource.OpenConnection();
+            using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+            using var insert = new NpgsqlCommand(
+                "INSERT INTO experiment_runs (id, transaction_limit_sen, status, config_snapshot) " +
+                "VALUES (@id, @limit, 'DRAFT', @snapshot) RETURNING encode(config_hash, 'hex')", connection, transaction);
+            insert.Parameters.AddWithValue("id", runId);
+            insert.Parameters.AddWithValue("limit", RunConfiguration.TransactionLimit(snapshot));
+            insert.Parameters.AddWithValue("snapshot", NpgsqlDbType.Jsonb, snapshot.ToJsonString());
+            var hash = (string)insert.ExecuteScalar()!;
+            AppendEvent(connection, transaction, runId, FinanceEvents.ManagedRunCreated(snapshot, hash));
+            transaction.Commit();
+            return true;
+        });
+        return GetRun(runId);
+    }
+
+    public RunInfo GetRun(Guid runId)
+    {
+        using var connection = dataSource.OpenConnection();
+        using var command = new NpgsqlCommand(
+            "SELECT status, status_reason, config_snapshot::text, encode(config_hash, 'hex'), queued_at, started_at, finished_at " +
+            "FROM experiment_runs WHERE id = @id", connection);
+        command.Parameters.AddWithValue("id", runId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) throw new LedgerValidationException(LedgerReasonCode.RunNotFound, "Run does not exist.");
+        DateTimeOffset? Time(int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
+        return new RunInfo(runId, !reader.IsDBNull(0), NullableString(reader, 0), NullableString(reader, 1),
+            reader.IsDBNull(2) ? null : JsonNode.Parse(reader.GetString(2))!.AsObject(), NullableString(reader, 3),
+            Time(4), Time(5), Time(6));
+    }
+
+    // Lifecycle transitions other than activation. Rejected transitions are recorded as POLICY_DENIED.
+    public RunInfo TransitionRun(Guid runId, RunStatus to, string? reason, string source)
+    {
+        Record(FinanceEvents.Operations.TransitionRun, runId,
+            FinanceEvents.Request(("to", RunLifecycle.Wire(to)), ("reason", reason)), source, () =>
+            {
+                if (runId == Guid.Empty) throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID is required.");
+                var storedReason = RunLifecycle.NormalizeReason(to, reason);
+                using var connection = dataSource.OpenConnection();
+                using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+                var from = LockExistingRun(connection, transaction, runId);
+                RunLifecycle.EnsureTransition(from, to);
+                if (to == RunStatus.Running)
+                    throw new IdempotencyConflictException(LedgerReasonCode.InvalidRunTransition, "Runs enter RUNNING only through activation.");
+                UpdateRunStatus(connection, transaction, runId, to, storedReason);
+                AppendEvent(connection, transaction, runId,
+                    FinanceEvents.RunStatusChanged(FinanceEvents.Operations.TransitionRun, from!.Value, to, storedReason, source));
+                transaction.Commit();
+                return true;
+            });
+        return GetRun(runId);
+    }
+
+    // INITIALIZING → RUNNING: opening funds and cap come only from the snapshot, in one transaction.
+    public OpenRunResult ActivateRun(Guid runId, string source) =>
+        Record(FinanceEvents.Operations.ActivateRun, runId, new JsonObject(), source, () =>
+        {
+            if (runId == Guid.Empty) throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID is required.");
+            using var connection = dataSource.OpenConnection();
+            using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+            var from = LockExistingRun(connection, transaction, runId);
+            RunLifecycle.EnsureTransition(from, RunStatus.Running);
+            using var read = new NpgsqlCommand("SELECT config_snapshot::text FROM experiment_runs WHERE id = @id", connection, transaction);
+            read.Parameters.AddWithValue("id", runId);
+            var snapshot = JsonNode.Parse((string)read.ExecuteScalar()!)!.AsObject();
+            var opening = OpenRunWithinTransaction(connection, transaction, runId, RunLifecycle.OpeningIdempotencyKey,
+                RunConfiguration.StartingBalance(snapshot), RunConfiguration.TransactionLimit(snapshot), false,
+                FinanceEvents.Operations.ActivateRun);
+            UpdateRunStatus(connection, transaction, runId, RunStatus.Running, null);
+            AppendEvent(connection, transaction, runId,
+                FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ActivateRun, from!.Value, RunStatus.Running, null, source));
+            transaction.Commit();
+            return opening;
+        });
+
+    private static void UpdateRunStatus(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, RunStatus to, string? reason)
+    {
+        using var update = new NpgsqlCommand(
+            "UPDATE experiment_runs SET status = @status, status_reason = @reason WHERE id = @id", connection, transaction);
+        update.Parameters.AddWithValue("status", RunLifecycle.Wire(to));
+        update.Parameters.AddWithValue("reason", NpgsqlDbType.Text, (object?)reason ?? DBNull.Value);
+        update.Parameters.AddWithValue("id", runId);
+        update.ExecuteNonQuery();
     }
 
     public IReadOnlyList<LedgerJournal> GetJournals(Guid runId)
@@ -540,7 +642,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         command.Parameters.AddWithValue("id", Guid.NewGuid());
         command.Parameters.AddWithValue("run_id", runId);
         command.Parameters.AddWithValue("event_type", pending.EventType);
-        command.Parameters.AddWithValue("event_version", FinanceEvents.Version);
+        command.Parameters.AddWithValue("event_version", pending.EventVersion);
         command.Parameters.AddWithValue("source", pending.Source);
         command.Parameters.AddWithValue("operation", NpgsqlDbType.Text, (object?)pending.Operation ?? DBNull.Value);
         command.Parameters.AddWithValue("outcome", NpgsqlDbType.Text, (object?)pending.Outcome ?? DBNull.Value);
@@ -566,7 +668,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
 
         using var connection = dataSource.OpenConnection();
         using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
-        LockExistingRun(connection, transaction, request.RunId);
+        RunLifecycle.EnsureActive(LockExistingRun(connection, transaction, request.RunId), RunLifecycle.MoneyMovement);
         if (GetRunTransactionLimit(connection, transaction, request.RunId) is null)
             throw new LedgerValidationException(LedgerReasonCode.RunPolicyNotConfigured, "Run transaction policy is not configured.");
         var result = CommitWithinTransaction(connection, transaction, request, operation);
@@ -638,13 +740,15 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         LedgerRequestValidation.ValidateAccountKinds(request.Kind, kinds[debit.AccountId], kinds[credit.AccountId]);
     }
 
-    private static void LockExistingRun(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
+    // Locks the run row and returns its lifecycle status (null for unmanaged legacy runs).
+    private static RunStatus? LockExistingRun(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
     {
         using var command = new NpgsqlCommand(
-            "SELECT id FROM experiment_runs WHERE id = @run_id FOR UPDATE", connection, transaction);
+            "SELECT coalesce(status, '') FROM experiment_runs WHERE id = @run_id FOR UPDATE", connection, transaction);
         command.Parameters.AddWithValue("run_id", runId);
-        if (command.ExecuteScalar() is null)
-            throw new LedgerValidationException(LedgerReasonCode.RunNotFound, "Run does not exist.");
+        var status = command.ExecuteScalar() as string
+            ?? throw new LedgerValidationException(LedgerReasonCode.RunNotFound, "Run does not exist.");
+        return status.Length == 0 ? null : RunLifecycle.Parse(status);
     }
 
     private static IReadOnlyDictionary<Guid, AccountKind> LoadAccountKinds(NpgsqlConnection connection,
@@ -773,12 +877,13 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         return command.ExecuteNonQuery() == 1;
     }
 
-    private static void LockRun(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
+    private static RunStatus? LockRun(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
     {
         using var command = new NpgsqlCommand(
-            "SELECT id FROM experiment_runs WHERE id = @run_id FOR UPDATE", connection, transaction);
+            "SELECT coalesce(status, '') FROM experiment_runs WHERE id = @run_id FOR UPDATE", connection, transaction);
         command.Parameters.AddWithValue("run_id", runId);
-        command.ExecuteScalar();
+        var status = (string?)command.ExecuteScalar() ?? string.Empty;
+        return status.Length == 0 ? null : RunLifecycle.Parse(status);
     }
 
     private static JournalKind? FindJournalByKey(

@@ -1,7 +1,10 @@
+using System.Text.Json.Serialization;
+
 namespace Finmind.Api.Finance;
 
 // HTTP mapping for finance outcomes (ADR-0005). Pure functions so it can be unit tested without hosting.
-public sealed record LedgerErrorBody(string Status, string ReasonCode, string Message, bool Committed, Guid? JournalId);
+public sealed record LedgerErrorBody(string Status, string ReasonCode, string Message, bool Committed, Guid? JournalId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? Fields = null);
 
 public static class LedgerHttpResponses
 {
@@ -31,6 +34,7 @@ public static class LedgerHttpResponses
 
     public static (int StatusCode, LedgerErrorBody Body) ForException(Exception exception) => exception switch
     {
+        RunConfigException config => (400, ForError(config.ReasonCode, config.Message).Body with { Fields = config.Fields }),
         LedgerException ledger => ForError(ledger.ReasonCode, ledger.Message),
         OverflowException => ForError(LedgerReasonCode.InvalidAmount, "Amount exceeds supported range."),
         _ => ForError(LedgerReasonCode.InternalError, GenericInternalErrorMessage)

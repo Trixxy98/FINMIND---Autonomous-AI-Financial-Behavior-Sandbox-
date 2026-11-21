@@ -124,6 +124,11 @@ Catalog `finance-reasons/v2` (ADR-0006) adds `JOURNAL_NOT_FOUND`,
 `JOURNAL_ALREADY_REVERSED`, `JOURNAL_NOT_REVERSIBLE` (denied), and
 `UNSUPPORTED_INITIATOR_TYPE` (malformed). No v1 code changed meaning.
 
+Catalog `finance-reasons/v3` (ADR-0008) adds `INVALID_RUN_CONFIG`
+(malformed), `INVALID_RUN_TRANSITION` (conflict), and `RUN_NOT_ACTIVE`
+(denied). `INVALID_RUN_CONFIG` responses also include `fields`, the names
+of invalid configuration fields (never their values).
+
 ## Out of scope
 
 - Durable storage of decisions. Persisting proposals and decisions with

@@ -13,7 +13,7 @@ public sealed record RunEvent(
 internal sealed record PendingEvent(
     string EventType, JsonObject Payload, string Source = FinanceEvents.InternalApiSource,
     string? Operation = null, string? Outcome = null, string? ReasonCode = null, string? IdempotencyKey = null,
-    Guid? JournalId = null, Guid? ObligationId = null);
+    Guid? JournalId = null, Guid? ObligationId = null, int EventVersion = FinanceEvents.Version);
 
 // Single source of event types and payloads so both ledgers record identical events.
 internal static class FinanceEvents
@@ -32,7 +32,30 @@ internal static class FinanceEvents
         public const string PayObligation = "pay_obligation";
         public const string ReverseJournal = "reverse_journal";
         public const string Commit = "commit";
+        public const string CreateRun = "create_run";
+        public const string TransitionRun = "transition_run";
+        public const string ActivateRun = "activate_run";
     }
+
+    // ADR-0008: RUN_CREATED v2 for managed runs carries the configuration hash, not the full snapshot.
+    public static PendingEvent ManagedRunCreated(JsonObject snapshot, string configHash) =>
+        new("RUN_CREATED", new JsonObject
+        {
+            ["configHash"] = configHash,
+            ["configSchemaVersion"] = snapshot["configSchemaVersion"]!.DeepClone(),
+            ["scenarioId"] = snapshot["scenarioId"]!.DeepClone(),
+            ["seed"] = snapshot["seed"]!.DeepClone(),
+            ["transactionLimitSen"] = snapshot["transactionLimitSen"]!.DeepClone(),
+            ["startingBalanceSen"] = snapshot["startingBalanceSen"]!.DeepClone()
+        }, Operation: Operations.CreateRun, EventVersion: 2);
+
+    public static PendingEvent RunStatusChanged(string operation, RunStatus from, RunStatus to, string? reason, string source) =>
+        new("RUN_STATUS_CHANGED", new JsonObject
+        {
+            ["from"] = RunLifecycle.Wire(from),
+            ["to"] = RunLifecycle.Wire(to),
+            ["reason"] = reason
+        }, source, operation);
 
     public static PendingEvent RunCreated(long transactionLimitSen) =>
         new("RUN_CREATED", new JsonObject { ["transactionLimitSen"] = transactionLimitSen }, Operation: Operations.OpenRun);
