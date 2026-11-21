@@ -5,6 +5,7 @@ using Npgsql;
 namespace Finmind.Finance.Tests;
 
 // ADR-0011: model invocation records and server-enforced wall-time and token budgets.
+[Collection(QueuedRunTests.Name)]
 public sealed class BudgetTests
 {
     private sealed class FakeTime : TimeProvider
@@ -79,6 +80,15 @@ public sealed class BudgetTests
             Assert.Equal("INVALID_TOOL_ARGUMENTS", (string?)invalid["reason_code"]);
             Assert.Equal(["extra", "inputTokens", "outputTokens", "turn"], invalid["data"]!["fields"]!.AsArray().Select(f => (string)f!));
             Assert.Equal(before, ledger.GetEvents(s.RunId, 0, 500).Count);
+        },
+        ["tool_only_turns_have_empty_text"] = ledger =>
+        {
+            var s = Start(ledger, TimeProvider.System);
+            var response = s.Gateway.RecordModelInvocation(s.RunId, new JsonObject
+            {
+                ["turn"] = 1, ["inputTokens"] = 1, ["outputTokens"] = 1, ["latencyMs"] = 1, ["outputText"] = ""
+            });
+            Assert.Equal("ok", (string)response["status"]!);
         },
         ["invocation_text_is_redacted"] = ledger =>
         {

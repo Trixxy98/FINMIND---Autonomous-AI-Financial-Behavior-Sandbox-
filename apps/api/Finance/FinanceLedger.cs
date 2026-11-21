@@ -51,7 +51,7 @@ public interface IFinanceLedger
     ToolCallBegin BeginToolCall(Guid runId, string toolCallId, string tool, JsonObject redactedArguments, string requestHash);
     void CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion);
     AgentView GetAgentView(Guid runId);
-    ModelInvocationResult RecordModelInvocation(Guid runId, int turn, long inputTokens, long outputTokens, long latencyMs, string outputText);
+    ModelInvocationResult RecordModelInvocation(Guid runId, ModelInvocation invocation);
 }
 
 public static class RunEventPaging
@@ -217,6 +217,7 @@ public sealed class InMemoryLedger : IFinanceLedger
         public int? VirtualDay;
         public readonly List<ScheduledEvent> Schedule = [];
         public long TokensUsed;
+        public long CostMicroUsd;
     }
 
     private sealed class ScheduledEvent(MaterializedScenarioEvent evt)
@@ -927,27 +928,31 @@ public sealed class InMemoryLedger : IFinanceLedger
     }
 
     // ADR-0011: records one agent turn. A retried turn is not recorded or counted twice.
-    public ModelInvocationResult RecordModelInvocation(Guid runId, int turn, long inputTokens, long outputTokens, long latencyMs, string outputText)
+    public ModelInvocationResult RecordModelInvocation(Guid runId, ModelInvocation invocation)
     {
         lock (_gate)
         {
             var status = RequireRun(runId);
-            var trace = FinanceEvents.TurnTrace(turn);
+            var trace = FinanceEvents.TurnTrace(invocation.Turn);
             var run = _managedRuns[runId];
             if (_events.TryGetValue(runId, out var events)
                 && events.Any(e => e.EventType == "MODEL_INVOCATION_COMPLETED" && e.TraceId == trace))
-                return new ModelInvocationResult(null, true, run.TokensUsed);
-            if (status != RunStatus.Running) return new ModelInvocationResult(LedgerReasonCode.RunNotActive, false, run.TokensUsed);
+                return new ModelInvocationResult(null, true, run.TokensUsed, run.CostMicroUsd);
+            if (status != RunStatus.Running)
+                return new ModelInvocationResult(LedgerReasonCode.RunNotActive, false, run.TokensUsed, run.CostMicroUsd);
 
-            StoreEvent(runId, FinanceEvents.ModelInvocationCompleted(turn, inputTokens, outputTokens, latencyMs, outputText));
-            run.TokensUsed = checked(run.TokensUsed + inputTokens + outputTokens);
+            var cost = AgentGatewayRules.CostOf(run.Snapshot, invocation);
+            StoreEvent(runId, FinanceEvents.ModelInvocationCompleted(invocation, cost));
+            run.TokensUsed = checked(run.TokensUsed + invocation.BudgetTokens);
+            run.CostMicroUsd = checked(run.CostMicroUsd + cost);
+            LedgerReasonCode? denial = null;
             if (WallTimeExceeded(runId))
-                return new ModelInvocationResult(Exhaust(runId, LedgerReasonCode.WallTimeBudgetExceeded,
-                    AgentGatewayRules.WallTimeExhaustedReason, trace), false, run.TokensUsed);
-            if (run.TokensUsed > AgentGatewayRules.MaxModelTokens(run.Snapshot))
-                return new ModelInvocationResult(Exhaust(runId, LedgerReasonCode.TokenBudgetExceeded,
-                    AgentGatewayRules.TokenExhaustedReason, trace), false, run.TokensUsed);
-            return new ModelInvocationResult(null, false, run.TokensUsed);
+                denial = Exhaust(runId, LedgerReasonCode.WallTimeBudgetExceeded, AgentGatewayRules.WallTimeExhaustedReason, trace);
+            else if (run.TokensUsed > AgentGatewayRules.MaxModelTokens(run.Snapshot))
+                denial = Exhaust(runId, LedgerReasonCode.TokenBudgetExceeded, AgentGatewayRules.TokenExhaustedReason, trace);
+            else if (AgentGatewayRules.Provider(run.Snapshot) != "mock" && run.CostMicroUsd > AgentGatewayRules.MaxCostMicroUsd(run.Snapshot))
+                denial = Exhaust(runId, LedgerReasonCode.CostBudgetExceeded, AgentGatewayRules.CostExhaustedReason, trace);
+            return new ModelInvocationResult(denial, false, run.TokensUsed, run.CostMicroUsd);
         }
     }
 

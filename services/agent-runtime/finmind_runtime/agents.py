@@ -20,16 +20,32 @@ class Observation:
     turn: int
     last_tool: Optional[str]
     last_response: Optional[Dict[str, Any]]
+    # Every (tool, response) from the previous turn, in call order (ADR-0012: a turn may hold several calls).
+    results: List[Tuple[str, Dict[str, Any]]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class Decision:
-    tool: str
-    arguments: Any
-    output_text: str
+    """One agent turn. Mock agents set tool/arguments; provider agents may set calls (zero or more)."""
+    tool: str = ""
+    arguments: Any = None
+    output_text: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
     latency_ms: int = 0
+    calls: Optional[List[Tuple[str, Any]]] = None
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    model: Optional[str] = None
+    stop_reason: Optional[str] = None
+    refusal_category: Optional[str] = None
+    terminal: Optional[str] = None  # "refusal" or "max_tokens": the worker ends the run
+
+    @property
+    def tool_calls(self) -> List[Tuple[str, Any]]:
+        if self.calls is not None:
+            return list(self.calls)
+        return [(self.tool, self.arguments)] if self.tool else []
 
 
 class Agent:
@@ -239,8 +255,12 @@ AGENTS: Dict[str, Callable[[Dict[str, Any]], Agent]] = {
 }
 
 
-def create_agent(snapshot: Dict[str, Any]) -> Agent:
+def create_agent(snapshot: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None) -> Agent:
     agent = snapshot.get("agent", {})
+    if agent.get("provider") == "anthropic":
+        # Imported here so mock runs and CI never need the Anthropic SDK.
+        from .claude import ClaudeAgent
+        return ClaudeAgent(snapshot, tools or [])
     if agent.get("provider") != "mock" or agent.get("modelId") not in AGENTS:
         raise ValueError(f"No agent for provider {agent.get('provider')!r} model {agent.get('modelId')!r}")
     return AGENTS[agent["modelId"]](snapshot)

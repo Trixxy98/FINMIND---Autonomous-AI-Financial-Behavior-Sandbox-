@@ -112,6 +112,10 @@ jobs:
           cat "$RUNNER_TEMP/api.log"
           exit 1
 
+      # ADR-0012: the pinned Anthropic SDK, so the adapter's parameter names are checked against it (no API calls).
+      - name: Install runtime dependencies
+        run: python -m pip install -r services/agent-runtime/requirements.txt
+
       - name: Run runtime unit and end-to-end tests
         run: python -B -m unittest discover -s services/agent-runtime/tests -v
 

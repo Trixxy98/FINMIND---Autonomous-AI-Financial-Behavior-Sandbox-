@@ -124,6 +124,16 @@ against postings.
 Deferred by plan: authentication and RBAC, tool grants, action/token/time
 budgets, run lifecycle, read-only replay, and export.
 
+### Claude provider (ADR-0012)
+
+`infra/db/migrations/012_model_cost_budget.sql` adds server-computed model
+cost per run. Claude runs use `run-config/v2`: explicit effort, an output
+token limit per turn, and a required cost budget; the snapshot records the
+prompt version and hash and the pricing version. The worker keeps the
+conversation append-only, records every turn before its tool calls, never
+falls back to another model on a refusal, and never sends the API key
+anywhere but Anthropic's API.
+
 ### Phase 2 gate status (21 November 2026)
 
 The end-to-end tests in CI run the real API, PostgreSQL, and Python worker

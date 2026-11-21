@@ -10,6 +10,9 @@ import unittest
 import urllib.request
 
 import _path  # noqa: F401
+from types import SimpleNamespace
+
+from finmind_runtime.claude import ClaudeAgent
 from finmind_runtime.client import Client, urllib_transport
 from finmind_runtime.worker import Worker
 
@@ -146,6 +149,45 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(http("GET", f"/internal/runs/{run_id}")["status"], "BUDGET_EXCEEDED")
         self.assertEqual(result.reason, "ACTION_BUDGET_EXCEEDED")
         self.assertEqual(sum(1 for e in events(run_id) if e["eventType"] == "TOOL_CALL_PROPOSED"), 6)
+
+    def test_claude_adapter_end_to_end_with_a_fake_sdk(self):
+        # The real API, database, and worker; only the Anthropic SDK client is scripted (no paid call).
+        def tool_use(id_, name, arguments):
+            return SimpleNamespace(type="tool_use", id=id_, name=name, input=arguments)
+
+        def reply(content, stop):
+            return SimpleNamespace(content=content, stop_reason=stop, model="claude-opus-5-5", stop_details=None,
+                                   usage=SimpleNamespace(input_tokens=1_000, output_tokens=200,
+                                                         cache_read_input_tokens=10_000, cache_creation_input_tokens=2_000))
+
+        scripted = [
+            reply([SimpleNamespace(type="text", text="Let me look around."), tool_use("a", "get_balance", {}),
+                   tool_use("b", "get_environment", {})], "tool_use"),
+            reply([tool_use("c", "finish", {"summary": "Balance checked."})], "tool_use"),
+        ]
+        fake_client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kwargs: scripted.pop(0)))
+        # Drain runs left queued by other tests so the scripted client only serves this run.
+        while Worker(Client(API, TOKEN)).run_once() is not None:
+            pass
+        config_body = config(scenario="S01")
+        config_body.update({"maxModelTokens": 100_000, "maxCostMicroUsd": 1_000_000,
+                            "agent": {"provider": "anthropic", "modelId": "claude-opus-5-5", "settings": {"effort": "medium"}}})
+        run_id = http("POST", "/internal/runs", config_body)["runId"]
+        http("POST", f"/internal/runs/{run_id}/start")
+        worker = Worker(Client(API, TOKEN), agent_factory=lambda snapshot, tools: ClaudeAgent(snapshot, tools, client=fake_client))
+        run_until_terminal(run_id, worker)
+
+        self.assertEqual(http("GET", f"/internal/runs/{run_id}")["status"], "COMPLETED")
+        evs = events(run_id)
+        invocations = [e for e in evs if e["eventType"] == "MODEL_INVOCATION_COMPLETED"]
+        self.assertEqual([e["eventVersion"] for e in invocations], [2, 2])
+        # 1,000 input x $4/M + 200 output x $20/M + 10,000 cache reads x $0.20/M + 2,000 cache writes x $5/M
+        self.assertEqual(invocations[0]["payload"]["costMicroUsd"], 4_000 + 4_000 + 2_000 + 10_000)
+        self.assertEqual(invocations[0]["payload"]["toolUseCount"], 2)
+        self.assertEqual(invocations[0]["payload"]["outputText"], "Let me look around.")
+        traces = [e["traceId"] for e in evs if e["eventType"] == "TOOL_CALL_PROPOSED"]
+        self.assertEqual(traces, ["turn-0001-1", "turn-0001-2", "turn-0002"])
+        self.assertTrue(http("GET", f"/internal/runs/{run_id}/events/verify")["intact"])
 
     def test_dropped_response_on_payment_is_retried_once(self):
         dropped = []

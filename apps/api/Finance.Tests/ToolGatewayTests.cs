@@ -5,6 +5,7 @@ using Npgsql;
 namespace Finmind.Finance.Tests;
 
 // ADR-0009: worker sessions and the agent tool gateway, on both ledgers.
+[Collection(QueuedRunTests.Name)]
 public sealed class ToolGatewayTests
 {
     private sealed class FakeTime : TimeProvider

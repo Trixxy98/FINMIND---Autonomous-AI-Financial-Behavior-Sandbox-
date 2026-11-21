@@ -83,12 +83,16 @@ public static class FinanceEvents
         }, AgentSource, Operations.ToolCall, status, reasonCode, TraceId: toolCallId);
 
     // ADR-0011: one event per agent turn; trace ID matches the turn's tool call ("turn-NNNN").
-    public static PendingEvent ModelInvocationCompleted(int turn, long inputTokens, long outputTokens, long latencyMs, string outputText) =>
+    // Version 2 (ADR-0012) adds model, stop reason, cache usage, tool-use count, and server-computed cost.
+    public static PendingEvent ModelInvocationCompleted(ModelInvocation invocation, long costMicroUsd) =>
         new("MODEL_INVOCATION_COMPLETED", new JsonObject
         {
-            ["turn"] = turn, ["inputTokens"] = inputTokens, ["outputTokens"] = outputTokens,
-            ["latencyMs"] = latencyMs, ["outputText"] = outputText
-        }, AgentSource, Operations.ToolCall, TraceId: TurnTrace(turn));
+            ["turn"] = invocation.Turn, ["inputTokens"] = invocation.InputTokens, ["outputTokens"] = invocation.OutputTokens,
+            ["latencyMs"] = invocation.LatencyMs, ["outputText"] = invocation.OutputText,
+            ["model"] = invocation.Model, ["stopReason"] = invocation.StopReason, ["refusalCategory"] = invocation.RefusalCategory,
+            ["cacheReadInputTokens"] = invocation.CacheReadInputTokens, ["cacheCreationInputTokens"] = invocation.CacheCreationInputTokens,
+            ["toolUseCount"] = invocation.ToolUseCount, ["costMicroUsd"] = costMicroUsd
+        }, AgentSource, Operations.ToolCall, TraceId: TurnTrace(invocation.Turn), EventVersion: 2);
 
     public static string TurnTrace(int turn) => $"turn-{turn:D4}";
 

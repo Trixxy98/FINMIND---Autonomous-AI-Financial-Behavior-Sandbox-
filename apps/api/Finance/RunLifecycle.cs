@@ -91,10 +91,12 @@ public static class RunCatalogs
     public static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> Models = new Dictionary<string, IReadOnlySet<string>>
     {
         // ADR-0011 deterministic mock agents.
-        ["mock"] = new HashSet<string> { "finmind-mock-v1", "finmind-mock-adversarial-v1", "finmind-mock-chaotic-v1" }
+        ["mock"] = new HashSet<string> { "finmind-mock-v1", "finmind-mock-adversarial-v1", "finmind-mock-chaotic-v1" },
+        // ADR-0012: the researcher chooses the model; claude-opus-5-5 is the default in examples.
+        ["anthropic"] = new HashSet<string> { "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5" }
     };
 
-    public const string ConfigSchemaVersion = "run-config/v1";
+    public const string ConfigSchemaVersion = "run-config/v2";
     public const string ToolsetVersion = "finmind-tools/v1";
     public const string PolicyVersion = "finance-policy/v1";
 }
@@ -107,7 +109,13 @@ public static class RunConfiguration
         "maxActions", "maxModelTokens", "maxWallTimeSeconds", "memoryMode", "agent"
     ];
 
-    private static readonly HashSet<string> AgentFields = ["provider", "modelId", "sampling"];
+    // run-config/v2 (ADR-0012) optional fields; defaults keep mock configurations short.
+    private static readonly string[] OptionalFields = ["maxCostMicroUsd", "describeUnavailableCapabilities"];
+
+    // "sampling" is the v1 name; it is accepted only as an empty object.
+    private static readonly HashSet<string> AgentFields = ["provider", "modelId", "settings", "sampling"];
+    private static readonly HashSet<string> AnthropicSettings = ["effort", "maxOutputTokensPerTurn"];
+    private static readonly HashSet<string> Efforts = ["low", "medium", "high", "xhigh", "max"];
 
     // Returns the stored snapshot: researcher fields plus server-added reproducibility metadata.
     public static JsonObject Validate(JsonObject? input, string? codeRevision)
@@ -115,7 +123,7 @@ public static class RunConfiguration
         var errors = new List<string>();
         if (input is null) throw new RunConfigException(["body"]);
 
-        errors.AddRange(input.Select(p => p.Key).Where(key => !RequiredFields.Contains(key)));
+        errors.AddRange(input.Select(p => p.Key).Where(key => !RequiredFields.Contains(key) && !OptionalFields.Contains(key)));
         errors.AddRange(RequiredFields.Where(key => !input.ContainsKey(key)));
 
         var objective = Text(input, "objective", 1, 2_000, errors);
@@ -131,9 +139,17 @@ public static class RunConfiguration
         var wallTime = Integer(input, "maxWallTimeSeconds", 1, 86_400, errors);
         var memoryMode = Text(input, "memoryMode", 1, 30, errors);
         if (memoryMode is not null && memoryMode is not ("none" or "bounded_summary")) errors.Add("memoryMode");
+        var maxCost = input.ContainsKey("maxCostMicroUsd") ? Integer(input, "maxCostMicroUsd", 0, 100_000_000, errors) : 0;
+        var describeUnavailable = false;
+        if (input.ContainsKey("describeUnavailableCapabilities"))
+        {
+            if (input["describeUnavailableCapabilities"] is JsonValue flag && flag.GetValueKind() is System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False)
+                describeUnavailable = flag.GetValue<bool>();
+            else errors.Add("describeUnavailableCapabilities");
+        }
 
         string? provider = null, modelId = null;
-        var sampling = new JsonObject();
+        var settings = new JsonObject();
         if (input["agent"] is JsonObject agent)
         {
             errors.AddRange(agent.Select(p => p.Key).Where(key => !AgentFields.Contains(key)).Select(key => $"agent.{key}"));
@@ -141,12 +157,28 @@ public static class RunConfiguration
             modelId = Text(agent, "modelId", 1, 100, errors, "agent.");
             if (provider is not null && !RunCatalogs.Models.ContainsKey(provider)) errors.Add("agent.provider");
             else if (provider is not null && modelId is not null && !RunCatalogs.Models[provider].Contains(modelId)) errors.Add("agent.modelId");
-            if (agent.ContainsKey("sampling"))
+            if (agent.ContainsKey("sampling") && agent["sampling"] is not JsonObject { Count: 0 })
+                errors.Add("agent.sampling");
+
+            var given = agent["settings"] as JsonObject;
+            if (agent.ContainsKey("settings") && given is null) errors.Add("agent.settings");
+            if (provider == "anthropic")
             {
-                // The mock provider accepts no sampling parameters.
-                if (agent["sampling"] is not JsonObject samplingObject || (provider == "mock" && samplingObject.Count > 0))
-                    errors.Add("agent.sampling");
-                else sampling = (JsonObject)samplingObject.DeepClone();
+                // ADR-0012: effort is always explicit so it is recorded; sampling parameters are not offered.
+                given ??= new JsonObject();
+                errors.AddRange(given.Select(p => p.Key).Where(key => !AnthropicSettings.Contains(key)).Select(key => $"agent.settings.{key}"));
+                var effort = Text(given, "effort", 1, 10, errors, "agent.settings.");
+                if (!given.ContainsKey("effort") || (effort is not null && !Efforts.Contains(effort))) errors.Add("agent.settings.effort");
+                var maxOutput = given.ContainsKey("maxOutputTokensPerTurn")
+                    ? Integer(given, "maxOutputTokensPerTurn", 1_024, 16_000, errors, "agent.settings.") : 16_000;
+                settings = new JsonObject { ["effort"] = effort, ["maxOutputTokensPerTurn"] = maxOutput };
+                if (maxCost is null or 0) errors.Add("maxCostMicroUsd");
+                if (memoryMode is not null and not "none") errors.Add("memoryMode");
+            }
+            else if (provider == "mock")
+            {
+                if (given is { Count: > 0 }) errors.Add("agent.settings");
+                if (maxCost is > 0) errors.Add("maxCostMicroUsd");
             }
             // Only the mock agent may run with a zero token budget.
             if (provider is not null && RunCatalogs.Models.ContainsKey(provider) && provider != "mock" && maxTokens == 0)
@@ -159,6 +191,7 @@ public static class RunConfiguration
 
         if (errors.Count > 0) throw new RunConfigException(errors.Distinct().Order(StringComparer.Ordinal).ToArray());
 
+        var prompt = provider == "anthropic" ? PromptCatalog.Current : null;
         return new JsonObject
         {
             ["objective"] = objective,
@@ -170,15 +203,19 @@ public static class RunConfiguration
             ["maxActions"] = maxActions,
             ["maxModelTokens"] = maxTokens,
             ["maxWallTimeSeconds"] = wallTime,
+            ["maxCostMicroUsd"] = maxCost,
             ["memoryMode"] = memoryMode,
-            ["agent"] = new JsonObject { ["provider"] = provider, ["modelId"] = modelId, ["sampling"] = sampling },
+            ["describeUnavailableCapabilities"] = describeUnavailable,
+            ["agent"] = new JsonObject { ["provider"] = provider, ["modelId"] = modelId, ["settings"] = settings },
             ["configSchemaVersion"] = RunCatalogs.ConfigSchemaVersion,
             ["scenarioVersion"] = scenario!.VersionLabel,
             ["scenarioHash"] = scenario.FileHash,
             ["toolsetVersion"] = RunCatalogs.ToolsetVersion,
             ["policyVersion"] = RunCatalogs.PolicyVersion,
             ["reasonCodeCatalog"] = LedgerReasonCodes.CatalogVersion,
-            ["promptVersion"] = provider == "mock" ? "none" : "unassigned",
+            ["promptVersion"] = prompt?.Version ?? "none",
+            ["promptHash"] = prompt?.Hash,
+            ["pricingVersion"] = provider == "anthropic" ? PricingCatalog.Version : "none",
             ["codeRevision"] = string.IsNullOrWhiteSpace(codeRevision) ? "unknown" : codeRevision.Trim()
         };
     }
@@ -212,12 +249,12 @@ public static class RunConfiguration
         return null;
     }
 
-    private static long? Integer(JsonObject source, string key, long min, long max, List<string> errors)
+    private static long? Integer(JsonObject source, string key, long min, long max, List<string> errors, string prefix = "")
     {
         if (!source.ContainsKey(key)) return null;
         if (source[key] is JsonValue value && TryGetInteger(value, out var number) && number >= min && number <= max)
             return number;
-        errors.Add(key);
+        errors.Add(prefix + key);
         return null;
     }
 

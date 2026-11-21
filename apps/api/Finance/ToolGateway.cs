@@ -39,7 +39,15 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
         new("inputTokens", "integer", true, "Input tokens.", 0, 10_000_000),
         new("outputTokens", "integer", true, "Output tokens.", 0, 10_000_000),
         new("latencyMs", "integer", true, "Model latency in milliseconds.", 0, 3_600_000),
-        new("outputText", "string", false, "Model output text (stored redacted).", MaxLength: 100_000)
+        // Empty when the model only called tools.
+        new("outputText", "string", false, "Model output text (stored redacted).", MaxLength: 100_000, AllowEmpty: true),
+        // ADR-0012 additions (optional for mock agents).
+        new("cacheReadInputTokens", "integer", false, "Cache read input tokens.", 0, 10_000_000),
+        new("cacheCreationInputTokens", "integer", false, "Cache creation input tokens.", 0, 10_000_000),
+        new("model", "string", false, "Model ID that answered.", MaxLength: 100, Format: "key"),
+        new("stopReason", "string", false, "Stop reason.", MaxLength: 40, Format: "key"),
+        new("refusalCategory", "string", false, "Refusal category.", MaxLength: 60, Format: "key"),
+        new("toolUseCount", "integer", false, "Tool calls in the response.", 0, 100)
     ]);
 
     // ADR-0011: records one agent turn and enforces the token and wall-time budgets.
@@ -54,10 +62,16 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
         }
 
         var args = (JsonObject)body!;
-        var result = ledger.RecordModelInvocation(runId, Int(args, "turn")!.Value, Long(args, "inputTokens"), Long(args, "outputTokens"),
-            Long(args, "latencyMs"), ToolArgumentRedaction.RedactText((string?)args["outputText"] ?? ""));
+        var result = ledger.RecordModelInvocation(runId, new ModelInvocation(
+            Int(args, "turn")!.Value, Long(args, "inputTokens"), Long(args, "outputTokens"), Long(args, "latencyMs"),
+            ToolArgumentRedaction.RedactText((string?)args["outputText"] ?? ""),
+            Int(args, "cacheReadInputTokens") ?? 0, Int(args, "cacheCreationInputTokens") ?? 0,
+            (string?)args["model"], (string?)args["stopReason"], (string?)args["refusalCategory"], Int(args, "toolUseCount") ?? 0));
         var response = result.Denial is { } denial ? Rejected(denial) : Ok(new JsonObject());
-        response["data"] = new JsonObject { ["replayed"] = result.Replayed, ["tokens_used"] = result.TokensUsed };
+        response["data"] = new JsonObject
+        {
+            ["replayed"] = result.Replayed, ["tokens_used"] = result.TokensUsed, ["cost_micro_usd"] = result.CostMicroUsd
+        };
         return response;
     }
 

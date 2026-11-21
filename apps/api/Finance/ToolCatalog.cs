@@ -4,7 +4,7 @@ namespace Finmind.Api.Finance;
 
 // ADR-0009 toolset finmind-tools/v1. Strict schemas: unknown fields, wrong types, and missing fields are invalid.
 public sealed record ToolParameter(string Name, string Type, bool Required, string Description,
-    long Min = 0, long Max = 0, int MaxLength = 0, string Format = "");
+    long Min = 0, long Max = 0, int MaxLength = 0, string Format = "", bool AllowEmpty = false);
 
 public sealed record ToolDefinition(string Name, string Description, IReadOnlyList<ToolParameter> Parameters)
 {
@@ -33,8 +33,8 @@ public sealed record ToolDefinition(string Name, string Description, IReadOnlyLi
             case "integer":
                 return TryGetInteger(value, out var number) && number >= parameter.Min && number <= parameter.Max;
             case "string":
-                if (!value.TryGetValue<string>(out var text) || string.IsNullOrWhiteSpace(text) || text.Length > parameter.MaxLength)
-                    return false;
+                if (!value.TryGetValue<string>(out var text) || text.Length > parameter.MaxLength) return false;
+                if (string.IsNullOrWhiteSpace(text)) return parameter.AllowEmpty;
                 return parameter.Format switch
                 {
                     "uuid" => Guid.TryParseExact(text, "D", out _),

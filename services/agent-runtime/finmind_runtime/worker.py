@@ -12,15 +12,18 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .agents import Agent, Observation, create_agent
+from .claude import ModelApiError, PromptMismatch
 from .client import ApiError, Client, SessionEnded, Unreachable
 
 log = logging.getLogger("finmind_runtime")
 
 # Server responses that mean the run has ended; the server already moved it and revoked the session.
-TERMINAL_REASONS = {"RUN_NOT_ACTIVE", "ACTION_BUDGET_EXCEEDED", "WALL_TIME_BUDGET_EXCEEDED", "TOKEN_BUDGET_EXCEEDED"}
+TERMINAL_REASONS = {"RUN_NOT_ACTIVE", "ACTION_BUDGET_EXCEEDED", "WALL_TIME_BUDGET_EXCEEDED", "TOKEN_BUDGET_EXCEEDED",
+                    "COST_BUDGET_EXCEEDED"}
+MAX_IDLE_TURNS = 3  # consecutive turns without tool calls before the run ends (ADR-0012)
 
 
 @dataclass
@@ -36,7 +39,7 @@ def tool_call_id(turn: int) -> str:
 
 
 class Worker:
-    def __init__(self, client: Client, agent_factory: Callable[[Dict[str, Any]], Agent] = create_agent,
+    def __init__(self, client: Client, agent_factory: Callable[[Dict[str, Any], List[Dict[str, Any]]], Agent] = create_agent,
                  clock: Callable[[], float] = time.monotonic,
                  on_turn: Optional[Callable[[str, int], None]] = None) -> None:
         self._client = client
@@ -60,11 +63,13 @@ class Worker:
         log.info("claimed run %s (%s)", run_id, snapshot.get("scenarioVersion"))
         try:
             self._client.initialize()
-            agent = self._agent_factory(snapshot)
+            agent = self._agent_factory(snapshot, claim.get("tools", []))
         except ApiError as error:
             return self._finish(run_id, "failed", f"runtime: initialization rejected ({error.reason_code})", 0)
-        except ValueError as error:
-            return self._finish(run_id, "failed", f"runtime: {error}", 0)
+        except PromptMismatch:
+            return self._finish(run_id, "failed", "runtime: prompt file does not match the run snapshot", 0)
+        except (ValueError, ImportError) as error:
+            return self._finish(run_id, "failed", f"runtime: {type(error).__name__}", 0)
         except SessionEnded:
             return RunResult(run_id, "stopped", 0, "session ended")
 
@@ -73,6 +78,8 @@ class Worker:
         max_turns = int(snapshot["maxActions"]) + 1
         last_tool: Optional[str] = None
         last_response: Optional[Dict[str, Any]] = None
+        last_results: List[Tuple[str, Dict[str, Any]]] = []
+        idle_turns = 0
         turn = 0
         try:
             while True:
@@ -87,20 +94,47 @@ class Worker:
                 turn += 1
                 if self._on_turn:
                     self._on_turn(run_id, turn)
-                decision = agent.next_action(Observation(snapshot["objective"], claim.get("tools", []), turn, last_tool, last_response))
-                invocation = self._client.model_invocation(turn, decision.input_tokens, decision.output_tokens,
-                                                           decision.latency_ms, decision.output_text)
+                try:
+                    decision = agent.next_action(Observation(snapshot["objective"], claim.get("tools", []), turn,
+                                                             last_tool, last_response, last_results))
+                except ModelApiError as error:
+                    return self._finish(run_id, "failed", f"runtime: model API error ({error})", turn)
+                calls = decision.tool_calls
+                invocation = self._client.model_invocation(
+                    turn, decision.input_tokens, decision.output_tokens, decision.latency_ms, decision.output_text,
+                    cacheReadInputTokens=decision.cache_read_tokens, cacheCreationInputTokens=decision.cache_creation_tokens,
+                    model=decision.model, stopReason=decision.stop_reason, refusalCategory=decision.refusal_category,
+                    toolUseCount=len(calls))
                 if invocation.get("reason_code") in TERMINAL_REASONS:
                     return RunResult(run_id, "stopped", turn, invocation["reason_code"])
+                if invocation.get("status") != "ok":
+                    # Every turn must be recorded; never continue past a rejected record.
+                    return self._finish(run_id, "failed", f"runtime: invocation record rejected ({invocation.get('reason_code')})", turn)
+                if decision.terminal == "refusal":
+                    return self._finish(run_id, "failed", f"model refusal ({decision.refusal_category or 'uncategorized'})", turn)
+                if decision.terminal == "max_tokens":
+                    return self._finish(run_id, "failed", "model output limit reached twice", turn)
 
-                response = self._client.tool_call(tool_call_id(turn), decision.tool, decision.arguments)
-                last_tool, last_response = decision.tool, response
-                reason = response.get("reason_code")
-                if reason in TERMINAL_REASONS:
-                    return RunResult(run_id, "stopped", turn, reason)
-                # After the virtual duration ends, mock agents read their balance and call finish.
-                if decision.tool == "finish" and response.get("status") == "ok":
-                    return self._finish(run_id, "completed", "agent finished", turn)
+                if not calls:
+                    idle_turns += 1
+                    if idle_turns >= MAX_IDLE_TURNS:
+                        return self._finish(run_id, "completed", "agent stopped calling tools", turn)
+                    last_results = []
+                    continue
+                idle_turns = 0
+
+                last_results = []
+                for index, (tool, arguments) in enumerate(calls, start=1):
+                    call_id = tool_call_id(turn) if len(calls) == 1 else f"{tool_call_id(turn)}-{index}"
+                    response = self._client.tool_call(call_id, tool, arguments)
+                    last_results.append((tool, response))
+                    reason = response.get("reason_code")
+                    if reason in TERMINAL_REASONS:
+                        return RunResult(run_id, "stopped", turn, reason)
+                    # After the virtual duration ends, agents read their balance and call finish.
+                    if tool == "finish" and response.get("status") == "ok":
+                        return self._finish(run_id, "completed", "agent finished", turn)
+                last_tool, last_response = last_results[-1]
         except SessionEnded:
             return RunResult(run_id, "stopped", turn, "session ended")
         except Unreachable:

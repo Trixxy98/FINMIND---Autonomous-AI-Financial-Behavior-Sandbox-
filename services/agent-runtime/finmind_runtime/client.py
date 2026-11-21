@@ -72,10 +72,13 @@ class Client:
     def heartbeat(self) -> Dict[str, Any]:
         return self._session("/internal/worker/session/heartbeat", None)
 
-    def model_invocation(self, turn: int, input_tokens: int, output_tokens: int, latency_ms: int, output_text: str) -> Dict[str, Any]:
-        return self._session("/internal/worker/session/model-invocations", {
-            "turn": turn, "inputTokens": input_tokens, "outputTokens": output_tokens,
-            "latencyMs": latency_ms, "outputText": output_text})
+    def model_invocation(self, turn: int, input_tokens: int, output_tokens: int, latency_ms: int, output_text: str,
+                         **extra: Any) -> Dict[str, Any]:
+        """extra: cacheReadInputTokens, cacheCreationInputTokens, model, stopReason, refusalCategory, toolUseCount."""
+        payload = {"turn": turn, "inputTokens": input_tokens, "outputTokens": output_tokens,
+                   "latencyMs": latency_ms, "outputText": output_text}
+        payload.update({key: value for key, value in extra.items() if value is not None})
+        return self._session("/internal/worker/session/model-invocations", payload)
 
     def tool_call(self, tool_call_id: str, tool: str, arguments: Any) -> Dict[str, Any]:
         return self._session("/internal/worker/session/tool-calls",

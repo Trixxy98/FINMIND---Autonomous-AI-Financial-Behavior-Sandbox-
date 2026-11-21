@@ -5,6 +5,7 @@ using Npgsql;
 namespace Finmind.Finance.Tests;
 
 // ADR-0008: managed runs, immutable snapshot, and server-enforced lifecycle.
+[Collection(QueuedRunTests.Name)]
 public sealed class RunLifecycleTests
 {
     private const string Source = "internal_api";
@@ -51,7 +52,8 @@ public sealed class RunLifecycleTests
             Assert.Equal("DRAFT", run.Status);
             Assert.Matches("^[0-9a-f]{64}$", run.ConfigHash!);
             var snapshot = run.ConfigSnapshot!;
-            Assert.Equal("run-config/v1", snapshot["configSchemaVersion"]!.GetValue<string>());
+            Assert.Equal("run-config/v2", snapshot["configSchemaVersion"]!.GetValue<string>());
+            Assert.Equal(("none", "none"), (snapshot["promptVersion"]!.GetValue<string>(), snapshot["pricingVersion"]!.GetValue<string>()));
             Assert.Equal("S01/v1", snapshot["scenarioVersion"]!.GetValue<string>());
             Assert.Equal(ScenarioCatalog.Latest("S01")!.FileHash, snapshot["scenarioHash"]!.GetValue<string>());
             Assert.Equal("finmind-tools/v1", snapshot["toolsetVersion"]!.GetValue<string>());

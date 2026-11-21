@@ -6,6 +6,7 @@ using Npgsql;
 namespace Finmind.Finance.Tests;
 
 // ADR-0010: scenario files, seeded materialization, and the virtual clock.
+[Collection(QueuedRunTests.Name)]
 public sealed class ScenarioTests
 {
     private const string Source = "internal_api";

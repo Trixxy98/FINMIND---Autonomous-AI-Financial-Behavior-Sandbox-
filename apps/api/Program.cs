@@ -14,6 +14,8 @@ var app = builder.Build();
 // ADR-0010: invalid scenario files stop startup.
 var scenarios = ScenarioCatalog.All;
 app.Logger.LogInformation("Loaded {Count} scenario files.", scenarios.Count);
+// ADR-0012: the agent prompt must exist at startup; its hash is recorded in new Claude runs.
+app.Logger.LogInformation("Agent prompt {Version} loaded.", PromptCatalog.Current.Version);
 
 // Every finance endpoint returns ADR-0005 bodies; internal errors are logged server-side only.
 IResult Execute(Func<IResult> action, bool isRead = false)

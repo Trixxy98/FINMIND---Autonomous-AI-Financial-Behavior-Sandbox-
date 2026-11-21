@@ -43,12 +43,14 @@ public enum LedgerReasonCode
     ToolCallIdConflict,
     // finance-reasons/v5 (ADR-0011)
     WallTimeBudgetExceeded,
-    TokenBudgetExceeded
+    TokenBudgetExceeded,
+    // finance-reasons/v6 (ADR-0012)
+    CostBudgetExceeded
 }
 
 public static class LedgerReasonCodes
 {
-    public const string CatalogVersion = "finance-reasons/v5";
+    public const string CatalogVersion = "finance-reasons/v6";
 
     public static LedgerOutcome OutcomeOf(LedgerReasonCode code) => code switch
     {
@@ -76,7 +78,8 @@ public static class LedgerReasonCodes
             or LedgerReasonCode.RunNotActive
             or LedgerReasonCode.ActionBudgetExceeded
             or LedgerReasonCode.WallTimeBudgetExceeded
-            or LedgerReasonCode.TokenBudgetExceeded => LedgerOutcome.Denied,
+            or LedgerReasonCode.TokenBudgetExceeded
+            or LedgerReasonCode.CostBudgetExceeded => LedgerOutcome.Denied,
         LedgerReasonCode.IdempotencyKeyConflict
             or LedgerReasonCode.InvoiceReferenceConflict
             or LedgerReasonCode.RunPolicyConflict
@@ -125,6 +128,7 @@ public static class LedgerReasonCodes
         LedgerReasonCode.ToolCallIdConflict => "TOOL_CALL_ID_CONFLICT",
         LedgerReasonCode.WallTimeBudgetExceeded => "WALL_TIME_BUDGET_EXCEEDED",
         LedgerReasonCode.TokenBudgetExceeded => "TOKEN_BUDGET_EXCEEDED",
+        LedgerReasonCode.CostBudgetExceeded => "COST_BUDGET_EXCEEDED",
         _ => "INTERNAL_ERROR"
     };
 

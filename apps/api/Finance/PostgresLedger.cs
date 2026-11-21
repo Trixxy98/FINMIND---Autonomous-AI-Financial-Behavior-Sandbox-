@@ -853,17 +853,17 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
     }
 
     // ADR-0011: records one agent turn under the run lock. A retried turn is not recorded or counted twice.
-    public ModelInvocationResult RecordModelInvocation(Guid runId, int turn, long inputTokens, long outputTokens, long latencyMs, string outputText)
+    public ModelInvocationResult RecordModelInvocation(Guid runId, ModelInvocation invocation)
     {
         using var connection = dataSource.OpenConnection();
         using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
         var status = LockExistingRun(connection, transaction, runId);
-        var trace = FinanceEvents.TurnTrace(turn);
+        var trace = FinanceEvents.TurnTrace(invocation.Turn);
 
-        long used;
-        long maxTokens;
+        long used, cost;
+        JsonObject snapshot;
         using (var read = new NpgsqlCommand(
-            "SELECT model_tokens_used, (config_snapshot->>'maxModelTokens')::bigint, " +
+            "SELECT model_tokens_used, model_cost_micro_usd, config_snapshot::text, " +
             "EXISTS (SELECT 1 FROM run_events WHERE run_id = @id AND event_type = 'MODEL_INVOCATION_COMPLETED' AND trace_id = @trace) " +
             "FROM experiment_runs WHERE id = @id", connection, transaction))
         {
@@ -872,25 +872,30 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             using var reader = read.ExecuteReader();
             reader.Read();
             used = reader.GetInt64(0);
-            maxTokens = reader.IsDBNull(1) ? 0 : reader.GetInt64(1);
-            if (reader.GetBoolean(2))
+            cost = reader.GetInt64(1);
+            snapshot = reader.IsDBNull(2) ? new JsonObject() : JsonNode.Parse(reader.GetString(2))!.AsObject();
+            if (reader.GetBoolean(3))
             {
                 reader.Close();
                 transaction.Commit();
-                return new ModelInvocationResult(null, true, used);
+                return new ModelInvocationResult(null, true, used, cost);
             }
         }
         if (status != RunStatus.Running)
         {
             transaction.Commit();
-            return new ModelInvocationResult(LedgerReasonCode.RunNotActive, false, used);
+            return new ModelInvocationResult(LedgerReasonCode.RunNotActive, false, used, cost);
         }
 
-        AppendEvent(connection, transaction, runId, FinanceEvents.ModelInvocationCompleted(turn, inputTokens, outputTokens, latencyMs, outputText));
-        used = checked(used + inputTokens + outputTokens);
-        using (var update = new NpgsqlCommand("UPDATE experiment_runs SET model_tokens_used = @used WHERE id = @id", connection, transaction))
+        var turnCost = AgentGatewayRules.CostOf(snapshot, invocation);
+        AppendEvent(connection, transaction, runId, FinanceEvents.ModelInvocationCompleted(invocation, turnCost));
+        used = checked(used + invocation.BudgetTokens);
+        cost = checked(cost + turnCost);
+        using (var update = new NpgsqlCommand(
+            "UPDATE experiment_runs SET model_tokens_used = @used, model_cost_micro_usd = @cost WHERE id = @id", connection, transaction))
         {
             update.Parameters.AddWithValue("used", used);
+            update.Parameters.AddWithValue("cost", cost);
             update.Parameters.AddWithValue("id", runId);
             update.ExecuteNonQuery();
         }
@@ -898,10 +903,12 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         LedgerReasonCode? denial = null;
         if (WallTimeExceeded(connection, transaction, runId))
             denial = Exhaust(connection, transaction, runId, LedgerReasonCode.WallTimeBudgetExceeded, AgentGatewayRules.WallTimeExhaustedReason, trace);
-        else if (used > maxTokens)
+        else if (used > AgentGatewayRules.MaxModelTokens(snapshot))
             denial = Exhaust(connection, transaction, runId, LedgerReasonCode.TokenBudgetExceeded, AgentGatewayRules.TokenExhaustedReason, trace);
+        else if (AgentGatewayRules.Provider(snapshot) != "mock" && cost > AgentGatewayRules.MaxCostMicroUsd(snapshot))
+            denial = Exhaust(connection, transaction, runId, LedgerReasonCode.CostBudgetExceeded, AgentGatewayRules.CostExhaustedReason, trace);
         transaction.Commit();
-        return new ModelInvocationResult(denial, false, used);
+        return new ModelInvocationResult(denial, false, used, cost);
     }
 
     // Stores the result and TOOL_RETURNED (plus any agent event such as FUNDING_REQUESTED) in one transaction.
