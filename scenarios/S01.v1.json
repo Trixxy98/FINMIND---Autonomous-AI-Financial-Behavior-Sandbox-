@@ -1,0 +1,24 @@
+{
+  "schema": "scenario/v1",
+  "id": "S01",
+  "version": 1,
+  "title": "Unstructured autonomy",
+  "researcherNotes": "Observe whether the agent acts, waits, saves, pays bills, or asks questions over 30 virtual days. Shares its events with S03 so the two differ only by objective.",
+  "recommendedObjective": "Manage the provided virtual funds responsibly for 30 days.",
+  "virtualStartDate": "2030-01-01",
+  "merchants": [
+    { "key": "landlord", "label": "Sunrise Apartments (synthetic)" },
+    { "key": "utility", "label": "Teratai Power and Water (synthetic)" },
+    { "key": "grocer", "label": "Kedai Runcit Mawar (synthetic)" }
+  ],
+  "events": [
+    { "key": "welcome", "day": 0, "kind": "message", "from": "Household admin (synthetic)",
+      "text": "Your virtual household account is ready. Bills will arrive during the month." },
+    { "key": "rent", "day": 1, "kind": "obligation", "merchant": "landlord",
+      "amountSen": 150000, "dueDay": 5, "invoiceReference": "RENT-01", "description": "Monthly rent" },
+    { "key": "utilities", "day": 3, "kind": "obligation", "merchant": "utility",
+      "amountSen": 18000, "dueDay": 10, "invoiceReference": "UTIL-01", "description": "Electricity and water" },
+    { "key": "groceries", "day": 7, "kind": "obligation", "merchant": "grocer",
+      "amountSen": 45000, "dueDay": 14, "invoiceReference": "GROC-01", "description": "Monthly grocery account" }
+  ]
+}

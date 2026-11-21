@@ -85,16 +85,9 @@ public static class RunLifecycle
     public static readonly RunStatus[] Setup = [RunStatus.Initializing, RunStatus.Running];
 }
 
-// Server catalogs. Scenario content and versions are defined by ADR-0010; until then entries are drafts.
+// Server catalogs. Scenarios come from versioned files (ADR-0010, ScenarioCatalog).
 public static class RunCatalogs
 {
-    public static readonly IReadOnlyDictionary<string, string> Scenarios = new Dictionary<string, string>
-    {
-        ["S01"] = "S01/draft-0",
-        ["S02"] = "S02/draft-0",
-        ["S03"] = "S03/draft-0"
-    };
-
     public static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> Models = new Dictionary<string, IReadOnlySet<string>>
     {
         ["mock"] = new HashSet<string> { "finmind-mock-v1" }
@@ -126,7 +119,8 @@ public static class RunConfiguration
 
         var objective = Text(input, "objective", 1, 2_000, errors);
         var scenarioId = Text(input, "scenarioId", 1, 20, errors);
-        if (scenarioId is not null && !RunCatalogs.Scenarios.ContainsKey(scenarioId)) errors.Add("scenarioId");
+        var scenario = scenarioId is null ? null : ScenarioCatalog.Latest(scenarioId);
+        if (scenarioId is not null && scenario is null) errors.Add("scenarioId");
         var seed = Integer(input, "seed", 0, int.MaxValue, errors);
         var starting = Integer(input, "startingBalanceSen", 1, 10_000_000_000, errors);
         var limit = Integer(input, "transactionLimitSen", 1, starting ?? 10_000_000_000, errors);
@@ -178,7 +172,8 @@ public static class RunConfiguration
             ["memoryMode"] = memoryMode,
             ["agent"] = new JsonObject { ["provider"] = provider, ["modelId"] = modelId, ["sampling"] = sampling },
             ["configSchemaVersion"] = RunCatalogs.ConfigSchemaVersion,
-            ["scenarioVersion"] = RunCatalogs.Scenarios[scenarioId!],
+            ["scenarioVersion"] = scenario!.VersionLabel,
+            ["scenarioHash"] = scenario.FileHash,
             ["toolsetVersion"] = RunCatalogs.ToolsetVersion,
             ["policyVersion"] = RunCatalogs.PolicyVersion,
             ["reasonCodeCatalog"] = LedgerReasonCodes.CatalogVersion,
@@ -193,6 +188,18 @@ public static class RunConfiguration
 
     public static long StartingBalance(JsonObject snapshot) => snapshot["startingBalanceSen"]!.GetValue<long>();
     public static long TransactionLimit(JsonObject snapshot) => snapshot["transactionLimitSen"]!.GetValue<long>();
+    public static long Seed(JsonObject snapshot) => snapshot["seed"]!.GetValue<long>();
+    public static int DurationDays(JsonObject snapshot) => (int)snapshot["durationDays"]!.GetValue<long>();
+
+    // ADR-0010: the run's scenario must be the exact file recorded in its snapshot.
+    public static ScenarioDefinition ResolveScenario(JsonObject snapshot)
+    {
+        var version = snapshot["scenarioVersion"]?.GetValue<string>();
+        var scenario = version is null ? null : ScenarioCatalog.Find(version);
+        if (scenario is null) throw new RunConfigException(["scenarioVersion"]);
+        if (scenario.FileHash != snapshot["scenarioHash"]?.GetValue<string>()) throw new RunConfigException(["scenarioHash"]);
+        return scenario;
+    }
 
     private static string? Text(JsonObject source, string key, int min, int max, List<string> errors, string prefix = "")
     {

@@ -7,7 +7,7 @@ namespace Finmind.Api.Finance;
 public sealed record RunEvent(
     Guid RunId, long Sequence, string EventType, int EventVersion, DateTimeOffset OccurredAt, string Source,
     string? Operation, string? Outcome, string? ReasonCode, string? IdempotencyKey,
-    Guid? JournalId, Guid? ObligationId, JsonObject Payload, string? EventHash);
+    Guid? JournalId, Guid? ObligationId, JsonObject Payload, string? EventHash, DateTimeOffset? VirtualTime = null);
 
 // An event built by an operation before the database assigns its sequence and hash.
 internal sealed record PendingEvent(
@@ -35,7 +35,48 @@ internal static class FinanceEvents
         public const string CreateRun = "create_run";
         public const string TransitionRun = "transition_run";
         public const string ActivateRun = "activate_run";
+        public const string AdvanceClock = "advance_clock";
     }
+
+    // ADR-0010 scenario and clock events.
+    public static PendingEvent ScenarioAccountCreated(Guid accountId, ScenarioMerchant merchant) =>
+        new("ACCOUNT_CREATED", new JsonObject
+        {
+            ["accountId"] = accountId, ["kind"] = Wire(AccountKind.Merchant),
+            ["scenarioKey"] = merchant.Key, ["label"] = merchant.Label
+        }, Operation: Operations.ActivateRun);
+
+    public static PendingEvent ScenarioMaterialized(ScenarioDefinition scenario, int eventCount, string scheduleHash) =>
+        new("SCENARIO_MATERIALIZED", new JsonObject
+        {
+            ["scenarioVersion"] = scenario.VersionLabel, ["scenarioHash"] = scenario.FileHash,
+            ["prng"] = Xoshiro256StarStar.Algorithm, ["eventCount"] = eventCount, ["scheduleHash"] = scheduleHash
+        }, Operation: Operations.ActivateRun);
+
+    public static PendingEvent ScenarioEventDelivered(string operation, MaterializedScenarioEvent evt, int deliveredAtDay, Guid? obligationId, string source) =>
+        new("SCENARIO_EVENT_DELIVERED", new JsonObject
+        {
+            ["eventKey"] = evt.Key, ["kind"] = evt.Kind, ["scheduledDay"] = evt.Day,
+            ["deliveredAtDay"] = deliveredAtDay, ["obligationId"] = obligationId
+        }, source, operation, ObligationId: obligationId);
+
+    public static PendingEvent ClockAdvanced(int fromDay, int toDay, int requestedDays, string source) =>
+        new("CLOCK_ADVANCED", new JsonObject
+        {
+            ["fromDay"] = fromDay, ["toDay"] = toDay, ["requestedDays"] = requestedDays
+        }, source, Operations.AdvanceClock);
+
+    public static PendingEvent ScenarioObligationCreated(ObligationResult obligation, string operation, string eventKey, string source) =>
+        new("OBLIGATION_CREATED", new JsonObject
+        {
+            ["obligationId"] = obligation.ObligationId,
+            ["merchantAccountId"] = obligation.MerchantAccountId,
+            ["amountSen"] = obligation.AmountSen,
+            ["invoiceReference"] = obligation.InvoiceReference,
+            ["dueDay"] = obligation.DueDay,
+            ["label"] = obligation.Label,
+            ["scenarioEventKey"] = eventKey
+        }, source, operation, ObligationId: obligation.ObligationId);
 
     // ADR-0008: RUN_CREATED v2 for managed runs carries the configuration hash, not the full snapshot.
     public static PendingEvent ManagedRunCreated(JsonObject snapshot, string configHash) =>

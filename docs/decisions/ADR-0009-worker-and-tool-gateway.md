@@ -187,7 +187,7 @@ unknown fields):
 
 Model messages and token usage are runtime events defined in ADR-0011.
 
-## Schema (migration 009)
+## Schema (migration 010)
 
 - `run_sessions`: `id`, `run_id`, `token_hash BYTEA UNIQUE`, `created_at`,
   `expires_at`, `revoked_at`; at most one unrevoked session per run.

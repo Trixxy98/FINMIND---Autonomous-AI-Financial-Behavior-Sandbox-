@@ -9,6 +9,10 @@ builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
 builder.Services.AddSingleton<PostgresLedger>();
 var app = builder.Build();
 
+// ADR-0010: invalid scenario files stop startup.
+var scenarios = ScenarioCatalog.All;
+app.Logger.LogInformation("Loaded {Count} scenario files.", scenarios.Count);
+
 // Every finance endpoint returns ADR-0005 bodies; internal errors are logged server-side only.
 IResult Execute(Func<IResult> action, bool isRead = false)
 {
@@ -66,6 +70,18 @@ app.MapPost("/internal/runs", (JsonObject? config, PostgresLedger ledger) =>
         var run = ledger.CreateManagedRun(config, codeRevision);
         return Results.Created($"/internal/runs/{run.RunId}", run);
     }));
+
+app.MapGet("/internal/scenarios", () => Results.Ok(ScenarioCatalog.All.Values
+    .OrderBy(s => s.Id, StringComparer.Ordinal).ThenBy(s => s.Version)
+    .Select(s => new
+    {
+        s.Id, s.Version, versionLabel = s.VersionLabel, s.Title, s.RecommendedObjective, fileHash = s.FileHash,
+        latest = ScenarioCatalog.Latest(s.Id)!.Version == s.Version,
+        merchantCount = s.Merchants.Count, eventCount = s.Events.Count
+    })));
+
+app.MapGet("/internal/runs/{runId:guid}/environment", (Guid runId, PostgresLedger ledger) =>
+    Execute(() => Results.Ok(ledger.GetEnvironment(runId)), isRead: true));
 
 app.MapGet("/internal/runs/{runId:guid}", (Guid runId, PostgresLedger ledger) =>
     Execute(() => Results.Ok(ledger.GetRun(runId)), isRead: true));

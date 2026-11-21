@@ -198,10 +198,23 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                 LedgerReasonCode.RunPolicyNotConfigured,
                 "Run transaction policy is not configured.");
 
+        var (obligation, created) = CreateObligationWithinTransaction(connection, transaction, runId,
+            merchantAccountId, amountSen, invoiceReference, null, null, null);
+        if (created)
+            AppendEvent(connection, transaction, runId, FinanceEvents.ObligationCreated(obligation));
+        transaction.Commit();
+        return obligation;
+    }
+
+    // Returns the stored obligation for an identical invoice reference, or inserts a new one.
+    private static (ObligationResult Obligation, bool Created) CreateObligationWithinTransaction(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, Guid merchantAccountId, long amountSen,
+        string invoiceReference, int? dueDay, string? label, string? scenarioEventKey)
+    {
         using (var existingCommand = new NpgsqlCommand(
             """
             SELECT id, merchant_account_id, amount_sen, paid,
-                invoice_reference
+                invoice_reference, due_day, label
             FROM obligations
             WHERE run_id = @run_id
             AND invoice_reference = @invoice_reference
@@ -221,7 +234,9 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                     reader.GetGuid(1),
                     reader.GetInt64(2),
                     reader.GetBoolean(3),
-                    reader.GetString(4));
+                    reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                    NullableString(reader, 6));
 
                 reader.Close();
 
@@ -233,8 +248,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                         "Invoice reference was previously used with a different payload.");
                 }
 
-                transaction.Commit();
-                return existing;
+                return (existing, false);
             }
         }
 
@@ -260,10 +274,10 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             """
             INSERT INTO obligations
                 (id, run_id, merchant_account_id,
-                amount_sen, invoice_reference)
+                amount_sen, invoice_reference, due_day, label, scenario_event_key)
             VALUES
                 (@id, @run_id, @merchant_id,
-                @amount_sen, @invoice_reference)
+                @amount_sen, @invoice_reference, @due_day, @label, @event_key)
             """,
             connection, transaction);
 
@@ -274,17 +288,11 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         command.Parameters.AddWithValue(
             "invoice_reference", invoiceReference);
 
+        command.Parameters.AddWithValue("due_day", NpgsqlDbType.Integer, (object?)dueDay ?? DBNull.Value);
+        command.Parameters.AddWithValue("label", NpgsqlDbType.Text, (object?)label ?? DBNull.Value);
+        command.Parameters.AddWithValue("event_key", NpgsqlDbType.Text, (object?)scenarioEventKey ?? DBNull.Value);
         command.ExecuteNonQuery();
-        var created = new ObligationResult(
-            obligationId,
-            merchantAccountId,
-            amountSen,
-            false,
-            invoiceReference);
-        AppendEvent(connection, transaction, runId, FinanceEvents.ObligationCreated(created));
-        transaction.Commit();
-
-        return created;
+        return (new ObligationResult(obligationId, merchantAccountId, amountSen, false, invoiceReference, dueDay, label), true);
     }
 
     public ObligationResult GetObligation(
@@ -296,7 +304,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         using var command = new NpgsqlCommand(
             """
             SELECT merchant_account_id, amount_sen, paid,
-                invoice_reference
+                invoice_reference, due_day, label
             FROM obligations
             WHERE id = @id AND run_id = @run_id
             """,
@@ -317,7 +325,9 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             reader.GetGuid(0),
             reader.GetInt64(1),
             reader.GetBoolean(2),
-            reader.GetString(3));
+            reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetInt32(4),
+            NullableString(reader, 5));
     }
 
     public CommitResult PayObligation(Guid runId, string idempotencyKey, Guid cashAccountId,
@@ -532,15 +542,169 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             using var read = new NpgsqlCommand("SELECT config_snapshot::text FROM experiment_runs WHERE id = @id", connection, transaction);
             read.Parameters.AddWithValue("id", runId);
             var snapshot = JsonNode.Parse((string)read.ExecuteScalar()!)!.AsObject();
+            var scenario = RunConfiguration.ResolveScenario(snapshot);
+            using (var clock = new NpgsqlCommand(
+                "UPDATE experiment_runs SET virtual_start_date = @start, virtual_day = 0 WHERE id = @id", connection, transaction))
+            {
+                clock.Parameters.AddWithValue("start", scenario.VirtualStartDate);
+                clock.Parameters.AddWithValue("id", runId);
+                clock.ExecuteNonQuery();
+            }
             var opening = OpenRunWithinTransaction(connection, transaction, runId, RunLifecycle.OpeningIdempotencyKey,
                 RunConfiguration.StartingBalance(snapshot), RunConfiguration.TransactionLimit(snapshot), false,
                 FinanceEvents.Operations.ActivateRun);
+
+            // ADR-0010: merchants, the stored schedule, and day-0 deliveries commit with opening funding.
+            foreach (var merchant in scenario.Merchants)
+            {
+                var accountId = Guid.NewGuid();
+                InsertAccount(connection, transaction, runId, accountId, AccountKind.Merchant, merchant);
+                AppendEvent(connection, transaction, runId, FinanceEvents.ScenarioAccountCreated(accountId, merchant));
+            }
+            var schedule = ScenarioCatalog.Materialize(scenario, RunConfiguration.Seed(snapshot));
+            for (var position = 0; position < schedule.Count; position++)
+            {
+                using var insert = new NpgsqlCommand(
+                    "INSERT INTO scenario_events (id, run_id, event_key, position, day, kind, payload) " +
+                    "VALUES (@id, @run_id, @key, @position, @day, @kind, @payload)", connection, transaction);
+                insert.Parameters.AddWithValue("id", Guid.NewGuid());
+                insert.Parameters.AddWithValue("run_id", runId);
+                insert.Parameters.AddWithValue("key", schedule[position].Key);
+                insert.Parameters.AddWithValue("position", position);
+                insert.Parameters.AddWithValue("day", schedule[position].Day);
+                insert.Parameters.AddWithValue("kind", schedule[position].Kind);
+                insert.Parameters.AddWithValue("payload", NpgsqlDbType.Jsonb, schedule[position].Payload.ToJsonString());
+                insert.ExecuteNonQuery();
+            }
+            AppendEvent(connection, transaction, runId,
+                FinanceEvents.ScenarioMaterialized(scenario, schedule.Count, ScenarioCatalog.ScheduleHash(schedule)));
+            DeliverDueEvents(connection, transaction, runId, 0, FinanceEvents.Operations.ActivateRun, source);
             UpdateRunStatus(connection, transaction, runId, RunStatus.Running, null);
             AppendEvent(connection, transaction, runId,
                 FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ActivateRun, from!.Value, RunStatus.Running, null, source));
             transaction.Commit();
             return opening;
         });
+
+    // ADR-0010: the only way virtual time moves. Delivers due scenario events in schedule order.
+    public ClockResult AdvanceClock(Guid runId, int days, string source) =>
+        Record(FinanceEvents.Operations.AdvanceClock, runId, FinanceEvents.Request(("days", (long)days)), source, () =>
+        {
+            if (days < 1) throw new LedgerValidationException(LedgerReasonCode.InvalidAmount, "Days must be positive.");
+            using var connection = dataSource.OpenConnection();
+            using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+            var status = LockExistingRun(connection, transaction, runId)
+                ?? throw new LedgerValidationException(LedgerReasonCode.RunNotActive, "Unmanaged runs have no virtual clock.");
+            RunLifecycle.EnsureActive(status, RunLifecycle.MoneyMovement);
+            var (start, day, duration) = ReadClock(connection, transaction, runId);
+            if (day >= duration)
+            {
+                transaction.Commit();
+                return new ClockResult(day, start.AddDays(day), 0, true, []);
+            }
+
+            var newDay = Math.Min(day + days, duration);
+            using (var update = new NpgsqlCommand("UPDATE experiment_runs SET virtual_day = @day WHERE id = @id", connection, transaction))
+            {
+                update.Parameters.AddWithValue("day", newDay);
+                update.Parameters.AddWithValue("id", runId);
+                update.ExecuteNonQuery();
+            }
+            AppendEvent(connection, transaction, runId, FinanceEvents.ClockAdvanced(day, newDay, days, source));
+            var delivered = DeliverDueEvents(connection, transaction, runId, newDay, FinanceEvents.Operations.AdvanceClock, source);
+            transaction.Commit();
+            return new ClockResult(newDay, start.AddDays(newDay), duration - newDay, newDay == duration, delivered);
+        });
+
+    public EnvironmentView GetEnvironment(Guid runId)
+    {
+        using var connection = dataSource.OpenConnection();
+        using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+        if (ReadManagedClockStatus(connection, transaction, runId) is null)
+            throw new LedgerValidationException(LedgerReasonCode.RunNotActive, "Run has no virtual clock.");
+        var (start, day, duration) = ReadClock(connection, transaction, runId);
+        using var command = new NpgsqlCommand(
+            "SELECT event_key, delivered_at_day, payload->>'from', payload->>'text' FROM scenario_events " +
+            "WHERE run_id = @run_id AND kind = 'message' AND delivered_at_day IS NOT NULL ORDER BY delivered_at_day, position",
+            connection, transaction);
+        command.Parameters.AddWithValue("run_id", runId);
+        var messages = new List<EnvironmentMessage>();
+        using (var reader = command.ExecuteReader())
+        {
+            while (reader.Read())
+                messages.Add(new EnvironmentMessage(reader.GetString(0), reader.GetInt32(1), reader.GetString(2), reader.GetString(3)));
+        }
+        transaction.Commit();
+        return new EnvironmentView(start.AddDays(day), day, duration - day, messages);
+    }
+
+    private static RunStatus? ReadManagedClockStatus(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT coalesce(status, ''), virtual_day IS NOT NULL FROM experiment_runs WHERE id = @run_id", connection, transaction);
+        command.Parameters.AddWithValue("run_id", runId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) throw new LedgerValidationException(LedgerReasonCode.RunNotFound, "Run does not exist.");
+        var status = reader.GetString(0);
+        return status.Length == 0 || !reader.GetBoolean(1) ? null : RunLifecycle.Parse(status);
+    }
+
+    private static (DateOnly Start, int Day, int Duration) ReadClock(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT virtual_start_date, virtual_day, (config_snapshot->>'durationDays')::int FROM experiment_runs WHERE id = @id",
+            connection, transaction);
+        command.Parameters.AddWithValue("id", runId);
+        using var reader = command.ExecuteReader();
+        reader.Read();
+        return (reader.GetFieldValue<DateOnly>(0), reader.GetInt32(1), reader.GetInt32(2));
+    }
+
+    // Delivers undelivered events with day <= upToDay, in (day, file position) order, exactly once.
+    private static IReadOnlyList<string> DeliverDueEvents(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        Guid runId, int upToDay, string operation, string source)
+    {
+        var due = new List<MaterializedScenarioEvent>();
+        using (var select = new NpgsqlCommand(
+            "SELECT event_key, day, kind, payload::text FROM scenario_events " +
+            "WHERE run_id = @run_id AND delivered_at_day IS NULL AND day <= @day ORDER BY day, position", connection, transaction))
+        {
+            select.Parameters.AddWithValue("run_id", runId);
+            select.Parameters.AddWithValue("day", upToDay);
+            using var reader = select.ExecuteReader();
+            while (reader.Read())
+                due.Add(new MaterializedScenarioEvent(reader.GetString(0), reader.GetInt32(1), reader.GetString(2),
+                    JsonNode.Parse(reader.GetString(3))!.AsObject()));
+        }
+
+        foreach (var evt in due)
+        {
+            Guid? obligationId = null;
+            if (evt.Kind == "obligation")
+            {
+                using var merchant = new NpgsqlCommand(
+                    "SELECT id FROM accounts WHERE run_id = @run_id AND scenario_key = @key", connection, transaction);
+                merchant.Parameters.AddWithValue("run_id", runId);
+                merchant.Parameters.AddWithValue("key", evt.Payload["merchant"]!.GetValue<string>());
+                var merchantId = (Guid)merchant.ExecuteScalar()!;
+                var (obligation, created) = CreateObligationWithinTransaction(connection, transaction, runId, merchantId,
+                    evt.Payload["amountSen"]!.GetValue<long>(), evt.Payload["invoiceReference"]!.GetValue<string>(),
+                    evt.Payload["dueDay"]!.GetValue<int>(), evt.Payload["description"]!.GetValue<string>(), evt.Key);
+                if (created)
+                    AppendEvent(connection, transaction, runId, FinanceEvents.ScenarioObligationCreated(obligation, operation, evt.Key, source));
+                obligationId = obligation.ObligationId;
+            }
+
+            using var mark = new NpgsqlCommand(
+                "UPDATE scenario_events SET delivered_at_day = @day WHERE run_id = @run_id AND event_key = @key", connection, transaction);
+            mark.Parameters.AddWithValue("day", upToDay);
+            mark.Parameters.AddWithValue("run_id", runId);
+            mark.Parameters.AddWithValue("key", evt.Key);
+            mark.ExecuteNonQuery();
+            AppendEvent(connection, transaction, runId, FinanceEvents.ScenarioEventDelivered(operation, evt, upToDay, obligationId, source));
+        }
+        return due.Select(e => e.Key).ToArray();
+    }
 
     private static void UpdateRunStatus(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, RunStatus to, string? reason)
     {
@@ -563,7 +727,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         using var connection = dataSource.OpenConnection();
         using var command = new NpgsqlCommand(
             "SELECT sequence, event_type, event_version, occurred_at, source, operation, outcome, reason_code, " +
-            "idempotency_key, journal_id, obligation_id, payload::text, encode(event_hash, 'hex') " +
+            "idempotency_key, journal_id, obligation_id, payload::text, encode(event_hash, 'hex'), virtual_time " +
             "FROM run_events WHERE run_id = @run_id AND sequence > @after ORDER BY sequence LIMIT @limit", connection);
         command.Parameters.AddWithValue("run_id", runId);
         command.Parameters.AddWithValue("after", afterSequence);
@@ -577,7 +741,8 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                 reader.GetFieldValue<DateTimeOffset>(3), reader.GetString(4),
                 NullableString(reader, 5), NullableString(reader, 6), NullableString(reader, 7), NullableString(reader, 8),
                 reader.IsDBNull(9) ? null : reader.GetGuid(9), reader.IsDBNull(10) ? null : reader.GetGuid(10),
-                JsonNode.Parse(reader.GetString(11))!.AsObject(), reader.GetString(12)));
+                JsonNode.Parse(reader.GetString(11))!.AsObject(), reader.GetString(12),
+                reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTimeOffset>(13)));
         }
         return events;
     }
@@ -936,10 +1101,13 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
     }
 
     private static void InsertAccount(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid runId, Guid accountId, AccountKind kind)
+        Guid runId, Guid accountId, AccountKind kind, ScenarioMerchant? merchant = null)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO accounts (id, run_id, kind) VALUES (@id, @run_id, @kind)", connection, transaction);
+            "INSERT INTO accounts (id, run_id, kind, scenario_key, label) VALUES (@id, @run_id, @kind, @scenario_key, @label)",
+            connection, transaction);
+        command.Parameters.AddWithValue("scenario_key", NpgsqlDbType.Text, (object?)merchant?.Key ?? DBNull.Value);
+        command.Parameters.AddWithValue("label", NpgsqlDbType.Text, (object?)merchant?.Label ?? DBNull.Value);
         command.Parameters.AddWithValue("id", accountId);
         command.Parameters.AddWithValue("run_id", runId);
         command.Parameters.AddWithValue("kind", ToDatabaseValue(kind));

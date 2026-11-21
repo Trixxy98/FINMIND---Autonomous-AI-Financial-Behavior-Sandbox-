@@ -15,7 +15,8 @@ public sealed record LedgerJournal(
 // Committed: the journal was durably recorded. Effective: it has not been reversed (ADR-0006).
 public sealed record CommitResult(Guid JournalId, bool Committed, bool WasIdempotentReplay, bool Effective = true, Guid? ReversedByJournalId = null);
 public sealed record OpenRunResult(Guid JournalId, bool Committed, bool WasIdempotentReplay, Guid CashAccountId);
-public sealed record ObligationResult(Guid ObligationId, Guid MerchantAccountId, long AmountSen, bool Paid, string InvoiceReference);
+public sealed record ObligationResult(Guid ObligationId, Guid MerchantAccountId, long AmountSen, bool Paid, string InvoiceReference,
+    int? DueDay = null, string? Label = null);
 public abstract class LedgerException(LedgerReasonCode reasonCode, string message) : Exception(message)
 {
     public LedgerReasonCode ReasonCode { get; } = reasonCode;
@@ -41,6 +42,8 @@ public interface IFinanceLedger
     RunInfo GetRun(Guid runId);
     RunInfo TransitionRun(Guid runId, RunStatus to, string? reason, string source);
     OpenRunResult ActivateRun(Guid runId, string source);
+    ClockResult AdvanceClock(Guid runId, int days, string source);
+    EnvironmentView GetEnvironment(Guid runId);
 }
 
 public static class RunEventPaging
@@ -161,13 +164,13 @@ internal static class LedgerRequestValidation
 
 public sealed class InMemoryLedger : IFinanceLedger
 {
-    private sealed record Account(Guid RunId, AccountKind Kind);
+    private sealed record Account(Guid RunId, AccountKind Kind, string? ScenarioKey = null, string? Label = null);
     private readonly object _gate = new();
     private readonly Dictionary<Guid, Account> _accounts = [];
     private readonly Dictionary<Guid, long> _balances = [];
     private readonly Dictionary<(Guid RunId, string Key), LedgerJournal> _journalsByKey = [];
     private readonly List<LedgerJournal> _journals = [];
-    private readonly Dictionary<Guid, (Guid RunId, Guid MerchantAccountId, long AmountSen, bool Paid, string InvoiceReference, Guid? PaidEntryId)> _obligations = [];
+    private readonly Dictionary<Guid, (Guid RunId, Guid MerchantAccountId, long AmountSen, bool Paid, string InvoiceReference, Guid? PaidEntryId, int? DueDay, string? Label)> _obligations = [];
     private readonly Dictionary<Guid, LedgerJournal> _journalsById = [];
     private readonly Dictionary<Guid, Guid> _reversalIdsByOriginal = [];
     private readonly Dictionary<(Guid RunId, string InvoiceReference), Guid> _obligationIdsByInvoice = [];
@@ -183,6 +186,15 @@ public sealed class InMemoryLedger : IFinanceLedger
         public JsonObject Snapshot { get; } = snapshot;
         public string Hash { get; } = hash;
         public DateTimeOffset? QueuedAt, StartedAt, FinishedAt;
+        public DateOnly? VirtualStart;
+        public int? VirtualDay;
+        public readonly List<ScheduledEvent> Schedule = [];
+    }
+
+    private sealed class ScheduledEvent(MaterializedScenarioEvent evt)
+    {
+        public MaterializedScenarioEvent Event { get; } = evt;
+        public int? DeliveredAt;
     }
 
     private RunStatus? StatusOf(Guid runId) => _managedRuns.TryGetValue(runId, out var run) ? run.Status : null;
@@ -501,7 +513,15 @@ public sealed class InMemoryLedger : IFinanceLedger
     {
         ValidateObligationRequest(runId, merchantAccountId, amountSen, invoiceReference);
         RunLifecycle.EnsureActive(StatusOf(runId), RunLifecycle.Setup);
+        var (obligation, created) = CreateObligationInternal(runId, merchantAccountId, amountSen, invoiceReference, null, null);
+        if (created) Emit(FinanceEvents.ObligationCreated(obligation));
+        return obligation;
+    }
 
+    // Mirrors PostgresLedger.CreateObligationWithinTransaction: returns an identical existing obligation or inserts one.
+    private (ObligationResult Obligation, bool Created) CreateObligationInternal(
+        Guid runId, Guid merchantAccountId, long amountSen, string invoiceReference, int? dueDay, string? label)
+    {
         {
             var invoiceKey = (runId, invoiceReference);
 
@@ -518,7 +538,7 @@ public sealed class InMemoryLedger : IFinanceLedger
                         "Invoice reference was previously used with a different payload.");
                 }
 
-                return GetObligation(runId, existingId);
+                return (GetObligation(runId, existingId), false);
             }
 
             EnsureAccountKind(
@@ -529,18 +549,11 @@ public sealed class InMemoryLedger : IFinanceLedger
             _obligations.Add(
                 obligationId,
                 (runId, merchantAccountId, amountSen,
-                false, invoiceReference, null));
+                false, invoiceReference, null, dueDay, label));
 
             _obligationIdsByInvoice.Add(invoiceKey, obligationId);
 
-            var created = new ObligationResult(
-                obligationId,
-                merchantAccountId,
-                amountSen,
-                false,
-                invoiceReference);
-            Emit(FinanceEvents.ObligationCreated(created));
-            return created;
+            return (new ObligationResult(obligationId, merchantAccountId, amountSen, false, invoiceReference, dueDay, label), true);
         }
     }
 
@@ -564,7 +577,9 @@ public sealed class InMemoryLedger : IFinanceLedger
                 obligation.MerchantAccountId,
                 obligation.AmountSen,
                 obligation.Paid,
-                obligation.InvoiceReference);
+                obligation.InvoiceReference,
+                obligation.DueDay,
+                obligation.Label);
         }
     }
 
@@ -714,13 +729,96 @@ public sealed class InMemoryLedger : IFinanceLedger
             if (runId == Guid.Empty) throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID is required.");
             var from = RequireRun(runId);
             RunLifecycle.EnsureTransition(from, RunStatus.Running);
-            var snapshot = _managedRuns[runId].Snapshot;
+            var run = _managedRuns[runId];
+            var snapshot = run.Snapshot;
+            var scenario = RunConfiguration.ResolveScenario(snapshot);
             var opening = OpenRunCore(runId, RunLifecycle.OpeningIdempotencyKey, RunConfiguration.StartingBalance(snapshot),
                 RunConfiguration.TransactionLimit(snapshot), FinanceEvents.Operations.ActivateRun);
+
+            // ADR-0010: same order as PostgresLedger.ActivateRun.
+            run.VirtualStart = scenario.VirtualStartDate;
+            run.VirtualDay = 0;
+            foreach (var merchant in scenario.Merchants)
+            {
+                var accountId = Guid.NewGuid();
+                _accounts.Add(accountId, new Account(runId, AccountKind.Merchant, merchant.Key, merchant.Label));
+                _balances.Add(accountId, 0);
+                Emit(FinanceEvents.ScenarioAccountCreated(accountId, merchant));
+            }
+            var schedule = ScenarioCatalog.Materialize(scenario, RunConfiguration.Seed(snapshot));
+            run.Schedule.AddRange(schedule.Select(evt => new ScheduledEvent(evt)));
+            Emit(FinanceEvents.ScenarioMaterialized(scenario, schedule.Count, ScenarioCatalog.ScheduleHash(schedule)));
+            DeliverDueEvents(runId, run, 0, FinanceEvents.Operations.ActivateRun, source);
             SetStatus(runId, RunStatus.Running, null);
             Emit(FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ActivateRun, from!.Value, RunStatus.Running, null, source));
             return opening;
         });
+
+    public ClockResult AdvanceClock(Guid runId, int days, string source) =>
+        Record(FinanceEvents.Operations.AdvanceClock, runId, FinanceEvents.Request(("days", (long)days)), source, () =>
+        {
+            if (days < 1) throw new LedgerValidationException(LedgerReasonCode.InvalidAmount, "Days must be positive.");
+            var status = RequireRun(runId)
+                ?? throw new LedgerValidationException(LedgerReasonCode.RunNotActive, "Unmanaged runs have no virtual clock.");
+            RunLifecycle.EnsureActive(status, RunLifecycle.MoneyMovement);
+            var run = _managedRuns[runId];
+            var duration = RunConfiguration.DurationDays(run.Snapshot);
+            var day = run.VirtualDay!.Value;
+            if (day >= duration) return new ClockResult(day, run.VirtualStart!.Value.AddDays(day), 0, true, []);
+
+            var newDay = Math.Min(day + days, duration);
+            run.VirtualDay = newDay;
+            Emit(FinanceEvents.ClockAdvanced(day, newDay, days, source));
+            var delivered = DeliverDueEvents(runId, run, newDay, FinanceEvents.Operations.AdvanceClock, source);
+            return new ClockResult(newDay, run.VirtualStart!.Value.AddDays(newDay), duration - newDay, newDay == duration, delivered);
+        });
+
+    public EnvironmentView GetEnvironment(Guid runId)
+    {
+        lock (_gate)
+        {
+            var status = RequireRun(runId);
+            if (status is null || _managedRuns[runId].VirtualDay is null)
+                throw new LedgerValidationException(LedgerReasonCode.RunNotActive, "Run has no virtual clock.");
+            var run = _managedRuns[runId];
+            var day = run.VirtualDay!.Value;
+            var messages = run.Schedule
+                .Select((scheduled, position) => (scheduled, position))
+                .Where(x => x.scheduled.Event.Kind == "message" && x.scheduled.DeliveredAt is not null)
+                .OrderBy(x => x.scheduled.DeliveredAt).ThenBy(x => x.position)
+                .Select(x => new EnvironmentMessage(x.scheduled.Event.Key, x.scheduled.DeliveredAt!.Value,
+                    x.scheduled.Event.Payload["from"]!.GetValue<string>(), x.scheduled.Event.Payload["text"]!.GetValue<string>()))
+                .ToArray();
+            return new EnvironmentView(run.VirtualStart!.Value.AddDays(day), day, RunConfiguration.DurationDays(run.Snapshot) - day, messages);
+        }
+    }
+
+    private IReadOnlyList<string> DeliverDueEvents(Guid runId, ManagedRun run, int upToDay, string operation, string source)
+    {
+        var due = run.Schedule
+            .Select((scheduled, position) => (scheduled, position))
+            .Where(x => x.scheduled.DeliveredAt is null && x.scheduled.Event.Day <= upToDay)
+            .OrderBy(x => x.scheduled.Event.Day).ThenBy(x => x.position)
+            .Select(x => x.scheduled).ToArray();
+        foreach (var scheduled in due)
+        {
+            var evt = scheduled.Event;
+            Guid? obligationId = null;
+            if (evt.Kind == "obligation")
+            {
+                var merchantKey = evt.Payload["merchant"]!.GetValue<string>();
+                var merchantId = _accounts.Single(a => a.Value.RunId == runId && a.Value.ScenarioKey == merchantKey).Key;
+                var (obligation, created) = CreateObligationInternal(runId, merchantId, evt.Payload["amountSen"]!.GetValue<long>(),
+                    evt.Payload["invoiceReference"]!.GetValue<string>(), evt.Payload["dueDay"]!.GetValue<int>(),
+                    evt.Payload["description"]!.GetValue<string>());
+                if (created) Emit(FinanceEvents.ScenarioObligationCreated(obligation, operation, evt.Key, source));
+                obligationId = obligation.ObligationId;
+            }
+            scheduled.DeliveredAt = upToDay;
+            Emit(FinanceEvents.ScenarioEventDelivered(operation, evt, upToDay, obligationId, source));
+        }
+        return due.Select(s => s.Event.Key).ToArray();
+    }
 
     // Mirrors PostgresLedger.LockExistingRun: unknown → RUN_NOT_FOUND; legacy → null status.
     private RunStatus? RequireRun(Guid runId)
@@ -783,7 +881,10 @@ public sealed class InMemoryLedger : IFinanceLedger
         if (!_events.TryGetValue(runId, out var events)) _events[runId] = events = [];
         events.Add(new RunEvent(runId, events.Count + 1, pending.EventType, pending.EventVersion, DateTimeOffset.UtcNow,
             pending.Source, pending.Operation, pending.Outcome, pending.ReasonCode, pending.IdempotencyKey,
-            pending.JournalId, pending.ObligationId, (JsonObject)pending.Payload.DeepClone(), null));
+            pending.JournalId, pending.ObligationId, (JsonObject)pending.Payload.DeepClone(), null,
+            _managedRuns.TryGetValue(runId, out var managed) && managed.VirtualDay is { } day
+                ? new DateTimeOffset(managed.VirtualStart!.Value.AddDays(day), TimeOnly.MinValue, TimeSpan.Zero)
+                : null));
     }
 
     public IReadOnlyList<RunEvent> GetEvents(Guid runId, long afterSequence, int limit)

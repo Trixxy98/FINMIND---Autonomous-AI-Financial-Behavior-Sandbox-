@@ -52,7 +52,8 @@ public sealed class RunLifecycleTests
             Assert.Matches("^[0-9a-f]{64}$", run.ConfigHash!);
             var snapshot = run.ConfigSnapshot!;
             Assert.Equal("run-config/v1", snapshot["configSchemaVersion"]!.GetValue<string>());
-            Assert.Equal("S01/draft-0", snapshot["scenarioVersion"]!.GetValue<string>());
+            Assert.Equal("S01/v1", snapshot["scenarioVersion"]!.GetValue<string>());
+            Assert.Equal(ScenarioCatalog.Latest("S01")!.FileHash, snapshot["scenarioHash"]!.GetValue<string>());
             Assert.Equal("finmind-tools/v1", snapshot["toolsetVersion"]!.GetValue<string>());
             Assert.Equal("finance-policy/v1", snapshot["policyVersion"]!.GetValue<string>());
             Assert.Equal(LedgerReasonCodes.CatalogVersion, snapshot["reasonCodeCatalog"]!.GetValue<string>());
