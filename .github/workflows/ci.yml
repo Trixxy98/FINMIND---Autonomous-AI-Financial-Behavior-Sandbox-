@@ -94,8 +94,30 @@ jobs:
       - name: Run finance unit and PostgreSQL integration tests
         run: dotnet test apps/api/Finance.Tests/Finmind.Finance.Tests.csproj --configuration Release --no-build --no-restore
 
-      - name: Run runtime tests
+      # ADR-0011: end-to-end tests run the real API against the test database as the restricted role.
+      - name: Start API for end-to-end tests
+        env:
+          ConnectionStrings__Finmind: ${{ env.FINMIND_API_TEST_DATABASE }}
+        run: |
+          token="$(openssl rand -hex 24)"
+          echo "::add-mask::$token"
+          echo "FINMIND_WORKER_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "FINMIND_E2E_API_URL=http://127.0.0.1:5080" >> "$GITHUB_ENV"
+          FINMIND_WORKER_TOKEN="$token" FINMIND_CODE_REVISION="$GITHUB_SHA" \
+            nohup dotnet apps/api/bin/Release/net10.0/Finmind.Api.dll > "$RUNNER_TEMP/api.log" 2>&1 &
+          for attempt in $(seq 1 30); do
+            curl -sf http://127.0.0.1:5080/health > /dev/null && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/api.log"
+          exit 1
+
+      - name: Run runtime unit and end-to-end tests
         run: python -B -m unittest discover -s services/agent-runtime/tests -v
+
+      - name: Show API log on failure
+        if: failure()
+        run: cat "$RUNNER_TEMP/api.log" || true
 
       - name: Install web dependencies
         working-directory: apps/web

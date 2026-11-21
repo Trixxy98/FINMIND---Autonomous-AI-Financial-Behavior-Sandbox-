@@ -33,6 +33,34 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
     public static bool IsValidToolCallId(string? toolCallId) =>
         toolCallId is { Length: >= 1 and <= 100 } && toolCallId.All(c => c is >= '!' and <= '~');
 
+    private static readonly ToolDefinition ModelInvocationSchema = new("model_invocation", "Worker report of one agent turn.",
+    [
+        new("turn", "integer", true, "Turn number.", 1, 100_000),
+        new("inputTokens", "integer", true, "Input tokens.", 0, 10_000_000),
+        new("outputTokens", "integer", true, "Output tokens.", 0, 10_000_000),
+        new("latencyMs", "integer", true, "Model latency in milliseconds.", 0, 3_600_000),
+        new("outputText", "string", false, "Model output text (stored redacted).", MaxLength: 100_000)
+    ]);
+
+    // ADR-0011: records one agent turn and enforces the token and wall-time budgets.
+    public JsonObject RecordModelInvocation(Guid runId, JsonNode? body)
+    {
+        var invalid = ModelInvocationSchema.Validate(body);
+        if (invalid.Count > 0)
+        {
+            var rejected = Rejected(LedgerReasonCode.InvalidToolArguments);
+            rejected["data"] = new JsonObject { ["fields"] = new JsonArray(invalid.Select(f => (JsonNode)f).ToArray()) };
+            return rejected;
+        }
+
+        var args = (JsonObject)body!;
+        var result = ledger.RecordModelInvocation(runId, Int(args, "turn")!.Value, Long(args, "inputTokens"), Long(args, "outputTokens"),
+            Long(args, "latencyMs"), ToolArgumentRedaction.RedactText((string?)args["outputText"] ?? ""));
+        var response = result.Denial is { } denial ? Rejected(denial) : Ok(new JsonObject());
+        response["data"] = new JsonObject { ["replayed"] = result.Replayed, ["tokens_used"] = result.TokensUsed };
+        return response;
+    }
+
     // Returns the agent-facing response. Throws on internal errors so the worker can retry the same toolCallId.
     public JsonObject Execute(Guid runId, string toolCallId, string tool, JsonNode? arguments)
     {

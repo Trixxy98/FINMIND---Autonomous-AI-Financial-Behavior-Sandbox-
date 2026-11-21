@@ -814,23 +814,94 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         {
             denial = LedgerReasonCode.RunNotActive;
         }
+        else if (WallTimeExceeded(connection, transaction, runId))
+        {
+            denial = Exhaust(connection, transaction, runId, LedgerReasonCode.WallTimeBudgetExceeded,
+                AgentGatewayRules.WallTimeExhaustedReason, toolCallId);
+        }
         else
         {
             using var read = new NpgsqlCommand("SELECT config_snapshot::text FROM experiment_runs WHERE id = @id", connection, transaction);
             read.Parameters.AddWithValue("id", runId);
             var snapshot = JsonNode.Parse((string)read.ExecuteScalar()!)!.AsObject();
             if (counted >= AgentGatewayRules.MaxActions(snapshot))
-            {
-                denial = LedgerReasonCode.ActionBudgetExceeded;
-                UpdateRunStatus(connection, transaction, runId, RunStatus.BudgetExceeded, AgentGatewayRules.BudgetExhaustedReason);
-                RevokeSessions(connection, transaction, runId);
-                AppendEvent(connection, transaction, runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ToolCall,
-                    RunStatus.Running, RunStatus.BudgetExceeded, AgentGatewayRules.BudgetExhaustedReason, FinanceEvents.GatewaySource)
-                    with { TraceId = toolCallId });
-            }
+                denial = Exhaust(connection, transaction, runId, LedgerReasonCode.ActionBudgetExceeded,
+                    AgentGatewayRules.BudgetExhaustedReason, toolCallId);
         }
         transaction.Commit();
         return new ToolCallBegin(ToolCallBeginKind.New, null, denial);
+    }
+
+    // Database time is the wall clock for budgets, so all API instances agree.
+    private static bool WallTimeExceeded(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT coalesce(started_at + make_interval(secs => (config_snapshot->>'maxWallTimeSeconds')::int) <= now(), false) " +
+            "FROM experiment_runs WHERE id = @id", connection, transaction);
+        command.Parameters.AddWithValue("id", runId);
+        return (bool)command.ExecuteScalar()!;
+    }
+
+    private static LedgerReasonCode Exhaust(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId,
+        LedgerReasonCode code, string reason, string traceId)
+    {
+        UpdateRunStatus(connection, transaction, runId, RunStatus.BudgetExceeded, reason);
+        RevokeSessions(connection, transaction, runId);
+        AppendEvent(connection, transaction, runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ToolCall,
+            RunStatus.Running, RunStatus.BudgetExceeded, reason, FinanceEvents.GatewaySource) with { TraceId = traceId });
+        return code;
+    }
+
+    // ADR-0011: records one agent turn under the run lock. A retried turn is not recorded or counted twice.
+    public ModelInvocationResult RecordModelInvocation(Guid runId, int turn, long inputTokens, long outputTokens, long latencyMs, string outputText)
+    {
+        using var connection = dataSource.OpenConnection();
+        using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+        var status = LockExistingRun(connection, transaction, runId);
+        var trace = FinanceEvents.TurnTrace(turn);
+
+        long used;
+        long maxTokens;
+        using (var read = new NpgsqlCommand(
+            "SELECT model_tokens_used, (config_snapshot->>'maxModelTokens')::bigint, " +
+            "EXISTS (SELECT 1 FROM run_events WHERE run_id = @id AND event_type = 'MODEL_INVOCATION_COMPLETED' AND trace_id = @trace) " +
+            "FROM experiment_runs WHERE id = @id", connection, transaction))
+        {
+            read.Parameters.AddWithValue("id", runId);
+            read.Parameters.AddWithValue("trace", trace);
+            using var reader = read.ExecuteReader();
+            reader.Read();
+            used = reader.GetInt64(0);
+            maxTokens = reader.IsDBNull(1) ? 0 : reader.GetInt64(1);
+            if (reader.GetBoolean(2))
+            {
+                reader.Close();
+                transaction.Commit();
+                return new ModelInvocationResult(null, true, used);
+            }
+        }
+        if (status != RunStatus.Running)
+        {
+            transaction.Commit();
+            return new ModelInvocationResult(LedgerReasonCode.RunNotActive, false, used);
+        }
+
+        AppendEvent(connection, transaction, runId, FinanceEvents.ModelInvocationCompleted(turn, inputTokens, outputTokens, latencyMs, outputText));
+        used = checked(used + inputTokens + outputTokens);
+        using (var update = new NpgsqlCommand("UPDATE experiment_runs SET model_tokens_used = @used WHERE id = @id", connection, transaction))
+        {
+            update.Parameters.AddWithValue("used", used);
+            update.Parameters.AddWithValue("id", runId);
+            update.ExecuteNonQuery();
+        }
+
+        LedgerReasonCode? denial = null;
+        if (WallTimeExceeded(connection, transaction, runId))
+            denial = Exhaust(connection, transaction, runId, LedgerReasonCode.WallTimeBudgetExceeded, AgentGatewayRules.WallTimeExhaustedReason, trace);
+        else if (used > maxTokens)
+            denial = Exhaust(connection, transaction, runId, LedgerReasonCode.TokenBudgetExceeded, AgentGatewayRules.TokenExhaustedReason, trace);
+        transaction.Commit();
+        return new ModelInvocationResult(denial, false, used);
     }
 
     // Stores the result and TOOL_RETURNED (plus any agent event such as FUNDING_REQUESTED) in one transaction.
@@ -930,6 +1001,15 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                 reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTimeOffset>(13), NullableString(reader, 14)));
         }
         return events;
+    }
+
+    // ADR-0007: first sequence whose position, link, or hash does not match, or null if the chain is intact.
+    public long? VerifyEventChain(Guid runId)
+    {
+        using var connection = dataSource.OpenConnection();
+        using var command = new NpgsqlCommand("SELECT finmind_verify_run_events(@run_id)", connection);
+        command.Parameters.AddWithValue("run_id", runId);
+        return command.ExecuteScalar() as long?;
     }
 
     private static string? NullableString(NpgsqlDataReader reader, int ordinal) =>

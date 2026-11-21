@@ -152,6 +152,14 @@ app.MapGet("/internal/runs/{runId:guid}/obligations/{obligationId:guid}", (Guid 
     Execute(() => Results.Ok(ledger.GetObligation(runId, obligationId)), isRead: true));
 
 // ADR-0007: ordered, append-only finance events for one run, paged by sequence cursor.
+app.MapGet("/internal/runs/{runId:guid}/events/verify", (Guid runId, PostgresLedger ledger) =>
+    Execute(() =>
+    {
+        ledger.GetRun(runId);
+        var broken = ledger.VerifyEventChain(runId);
+        return Results.Ok(new { runId, intact = broken is null, brokenAtSequence = broken });
+    }, isRead: true));
+
 // afterSequence below 0 is treated as 0; limit is clamped to 1..500.
 app.MapGet("/internal/runs/{runId:guid}/events", (Guid runId, long? afterSequence, int? limit, PostgresLedger ledger) =>
     Execute(() =>
@@ -235,6 +243,9 @@ if (workerToken is { Length: >= 32 })
 
         return Execute(() => Results.Json(gateway.Execute(runId, toolCallId, tool, body["arguments"]?.DeepClone())));
     });
+
+    worker.MapPost("/session/model-invocations", (HttpRequest request, JsonObject? body, ToolGateway gateway) =>
+        WithSession(request, gateway, runId => Execute(() => Results.Json(gateway.RecordModelInvocation(runId, body)))));
 
     worker.MapPost("/session/finish", (HttpRequest request, FinishRunRequest finish, ToolGateway gateway, PostgresLedger ledger) =>
         WithSession(request, gateway, runId => Execute(() =>

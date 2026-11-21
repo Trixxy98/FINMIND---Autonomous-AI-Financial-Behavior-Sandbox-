@@ -124,6 +124,16 @@ against postings.
 Deferred by plan: authentication and RBAC, tool grants, action/token/time
 budgets, run lifecycle, read-only replay, and export.
 
+### Phase 2 gate status (21 November 2026)
+
+The end-to-end tests in CI run the real API, PostgreSQL, and Python worker
+with deterministic mock agents on S01–S03. They check, for every tool call,
+the causal chain `MODEL_INVOCATION_COMPLETED → TOOL_CALL_PROPOSED → (ledger
+events) → TOOL_RETURNED`, ledger reconciliation, the event hash chain,
+identical traces for repeated configurations, cancellation, the action
+budget, and exactly-once effect after a dropped payment response. Real
+model providers are not integrated yet.
+
 ### Commit procedure
 1. Authenticate trusted caller and resolve scoped run principal server-side.
 2. Validate schema, run state, tool grant, ownership, currency, amount, destination, limits, and idempotency.

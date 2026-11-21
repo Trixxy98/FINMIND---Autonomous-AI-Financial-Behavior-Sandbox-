@@ -134,6 +134,9 @@ Catalog `finance-reasons/v4` (ADR-0009) adds the outcome
 `INVALID_TOOL_ARGUMENTS` (malformed), `ACTION_BUDGET_EXCEEDED` (denied),
 and `TOOL_CALL_ID_CONFLICT` (conflict).
 
+Catalog `finance-reasons/v5` (ADR-0011) adds `WALL_TIME_BUDGET_EXCEEDED`
+and `TOKEN_BUDGET_EXCEEDED` (denied).
+
 ## Out of scope
 
 - Durable storage of decisions. Persisting proposals and decisions with

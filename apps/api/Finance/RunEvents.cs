@@ -82,6 +82,16 @@ public static class FinanceEvents
             ["toolCallId"] = toolCallId, ["tool"] = tool, ["status"] = status, ["reasonCode"] = reasonCode, ["journalId"] = journalId
         }, AgentSource, Operations.ToolCall, status, reasonCode, TraceId: toolCallId);
 
+    // ADR-0011: one event per agent turn; trace ID matches the turn's tool call ("turn-NNNN").
+    public static PendingEvent ModelInvocationCompleted(int turn, long inputTokens, long outputTokens, long latencyMs, string outputText) =>
+        new("MODEL_INVOCATION_COMPLETED", new JsonObject
+        {
+            ["turn"] = turn, ["inputTokens"] = inputTokens, ["outputTokens"] = outputTokens,
+            ["latencyMs"] = latencyMs, ["outputText"] = outputText
+        }, AgentSource, Operations.ToolCall, TraceId: TurnTrace(turn));
+
+    public static string TurnTrace(int turn) => $"turn-{turn:D4}";
+
     public static PendingEvent AgentEvent(string eventType, string toolCallId, JsonObject payload) =>
         new(eventType, payload, AgentSource, Operations.ToolCall, TraceId: toolCallId);
 

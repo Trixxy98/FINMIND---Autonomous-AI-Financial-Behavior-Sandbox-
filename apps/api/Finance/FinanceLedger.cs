@@ -51,6 +51,7 @@ public interface IFinanceLedger
     ToolCallBegin BeginToolCall(Guid runId, string toolCallId, string tool, JsonObject redactedArguments, string requestHash);
     void CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion);
     AgentView GetAgentView(Guid runId);
+    ModelInvocationResult RecordModelInvocation(Guid runId, int turn, long inputTokens, long outputTokens, long latencyMs, string outputText);
 }
 
 public static class RunEventPaging
@@ -171,6 +172,13 @@ internal static class LedgerRequestValidation
 
 public sealed class InMemoryLedger : IFinanceLedger
 {
+    private readonly TimeProvider _time;
+
+    public InMemoryLedger() : this(TimeProvider.System) { }
+
+    // Tests pass a controllable clock for wall-time budgets and timestamps.
+    public InMemoryLedger(TimeProvider time) => _time = time;
+
     private sealed record Account(Guid RunId, AccountKind Kind, string? ScenarioKey = null, string? Label = null);
     private readonly object _gate = new();
     private readonly Dictionary<Guid, Account> _accounts = [];
@@ -208,6 +216,7 @@ public sealed class InMemoryLedger : IFinanceLedger
         public DateOnly? VirtualStart;
         public int? VirtualDay;
         public readonly List<ScheduledEvent> Schedule = [];
+        public long TokensUsed;
     }
 
     private sealed class ScheduledEvent(MaterializedScenarioEvent evt)
@@ -890,15 +899,55 @@ public sealed class InMemoryLedger : IFinanceLedger
             _toolCalls[(runId, toolCallId)] = new ToolCallRecord(tool, (JsonObject)redactedArguments.DeepClone(), requestHash);
             StoreEvent(runId, FinanceEvents.ToolCallProposed(toolCallId, tool, redactedArguments));
             if (status != RunStatus.Running) return new ToolCallBegin(ToolCallBeginKind.New, null, LedgerReasonCode.RunNotActive);
+            if (WallTimeExceeded(runId))
+                return new ToolCallBegin(ToolCallBeginKind.New, null,
+                    Exhaust(runId, LedgerReasonCode.WallTimeBudgetExceeded, AgentGatewayRules.WallTimeExhaustedReason, toolCallId));
             if (counted >= AgentGatewayRules.MaxActions(_managedRuns[runId].Snapshot))
-            {
-                SetStatus(runId, RunStatus.BudgetExceeded, AgentGatewayRules.BudgetExhaustedReason);
-                RevokeSessions(runId);
-                StoreEvent(runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ToolCall, RunStatus.Running,
-                    RunStatus.BudgetExceeded, AgentGatewayRules.BudgetExhaustedReason, FinanceEvents.GatewaySource) with { TraceId = toolCallId });
-                return new ToolCallBegin(ToolCallBeginKind.New, null, LedgerReasonCode.ActionBudgetExceeded);
-            }
+                return new ToolCallBegin(ToolCallBeginKind.New, null,
+                    Exhaust(runId, LedgerReasonCode.ActionBudgetExceeded, AgentGatewayRules.BudgetExhaustedReason, toolCallId));
             return new ToolCallBegin(ToolCallBeginKind.New, null, null);
+        }
+    }
+
+    private bool WallTimeExceeded(Guid runId)
+    {
+        var run = _managedRuns[runId];
+        return run.StartedAt is { } started
+            && _time.GetUtcNow() >= started.AddSeconds(AgentGatewayRules.MaxWallTimeSeconds(run.Snapshot));
+    }
+
+    // Ends a RUNNING run because a budget is exhausted (ADR-0009, ADR-0011).
+    private LedgerReasonCode Exhaust(Guid runId, LedgerReasonCode code, string reason, string traceId)
+    {
+        SetStatus(runId, RunStatus.BudgetExceeded, reason);
+        RevokeSessions(runId);
+        StoreEvent(runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ToolCall, RunStatus.Running,
+            RunStatus.BudgetExceeded, reason, FinanceEvents.GatewaySource) with { TraceId = traceId });
+        return code;
+    }
+
+    // ADR-0011: records one agent turn. A retried turn is not recorded or counted twice.
+    public ModelInvocationResult RecordModelInvocation(Guid runId, int turn, long inputTokens, long outputTokens, long latencyMs, string outputText)
+    {
+        lock (_gate)
+        {
+            var status = RequireRun(runId);
+            var trace = FinanceEvents.TurnTrace(turn);
+            var run = _managedRuns[runId];
+            if (_events.TryGetValue(runId, out var events)
+                && events.Any(e => e.EventType == "MODEL_INVOCATION_COMPLETED" && e.TraceId == trace))
+                return new ModelInvocationResult(null, true, run.TokensUsed);
+            if (status != RunStatus.Running) return new ModelInvocationResult(LedgerReasonCode.RunNotActive, false, run.TokensUsed);
+
+            StoreEvent(runId, FinanceEvents.ModelInvocationCompleted(turn, inputTokens, outputTokens, latencyMs, outputText));
+            run.TokensUsed = checked(run.TokensUsed + inputTokens + outputTokens);
+            if (WallTimeExceeded(runId))
+                return new ModelInvocationResult(Exhaust(runId, LedgerReasonCode.WallTimeBudgetExceeded,
+                    AgentGatewayRules.WallTimeExhaustedReason, trace), false, run.TokensUsed);
+            if (run.TokensUsed > AgentGatewayRules.MaxModelTokens(run.Snapshot))
+                return new ModelInvocationResult(Exhaust(runId, LedgerReasonCode.TokenBudgetExceeded,
+                    AgentGatewayRules.TokenExhaustedReason, trace), false, run.TokensUsed);
+            return new ModelInvocationResult(null, false, run.TokensUsed);
         }
     }
 
@@ -945,7 +994,7 @@ public sealed class InMemoryLedger : IFinanceLedger
     private void SetStatus(Guid runId, RunStatus to, string? reason)
     {
         var run = _managedRuns[runId];
-        var now = DateTimeOffset.UtcNow;
+        var now = _time.GetUtcNow();
         run.Status = to;
         run.Reason = reason;
         if (to == RunStatus.Queued) run.QueuedAt = now;
@@ -994,7 +1043,7 @@ public sealed class InMemoryLedger : IFinanceLedger
         pending = pending.WithCallContext();
         if (!_runTransactionLimits.ContainsKey(runId)) return;
         if (!_events.TryGetValue(runId, out var events)) _events[runId] = events = [];
-        events.Add(new RunEvent(runId, events.Count + 1, pending.EventType, pending.EventVersion, DateTimeOffset.UtcNow,
+        events.Add(new RunEvent(runId, events.Count + 1, pending.EventType, pending.EventVersion, _time.GetUtcNow(),
             pending.Source, pending.Operation, pending.Outcome, pending.ReasonCode, pending.IdempotencyKey,
             pending.JournalId, pending.ObligationId, (JsonObject)pending.Payload.DeepClone(), null,
             _managedRuns.TryGetValue(runId, out var managed) && managed.VirtualDay is { } day

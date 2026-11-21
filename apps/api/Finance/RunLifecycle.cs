@@ -90,7 +90,8 @@ public static class RunCatalogs
 {
     public static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> Models = new Dictionary<string, IReadOnlySet<string>>
     {
-        ["mock"] = new HashSet<string> { "finmind-mock-v1" }
+        // ADR-0011 deterministic mock agents.
+        ["mock"] = new HashSet<string> { "finmind-mock-v1", "finmind-mock-adversarial-v1", "finmind-mock-chaotic-v1" }
     };
 
     public const string ConfigSchemaVersion = "run-config/v1";

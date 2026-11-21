@@ -10,6 +10,9 @@ public sealed record ToolCallBegin(ToolCallBeginKind Kind, JsonObject? StoredRes
 
 public sealed record ToolCallCompletion(JsonObject Response, string Status, string? ReasonCode, Guid? JournalId, PendingEvent? ExtraEvent);
 
+// ADR-0011: Replayed is true when this turn was already recorded (a worker retry); tokens are not counted twice.
+public sealed record ModelInvocationResult(LedgerReasonCode? Denial, bool Replayed, long TokensUsed);
+
 public sealed record AgentMerchant(Guid AccountId, string Key, string Label);
 
 public sealed record AgentView(Guid CashAccountId, Guid? SavingsAccountId, IReadOnlyList<AgentMerchant> Merchants,
@@ -19,6 +22,10 @@ public static class AgentGatewayRules
 {
     public static readonly TimeSpan SessionLifetime = TimeSpan.FromMinutes(10);
     public const string BudgetExhaustedReason = "Action budget exhausted.";
+    public const string WallTimeExhaustedReason = "Wall-time budget exhausted.";
+    public const string TokenExhaustedReason = "Token budget exhausted.";
+    public static int MaxWallTimeSeconds(JsonObject snapshot) => (int)snapshot["maxWallTimeSeconds"]!.GetValue<long>();
+    public static long MaxModelTokens(JsonObject snapshot) => snapshot["maxModelTokens"]!.GetValue<long>();
 
     public static int MaxActions(JsonObject snapshot) => (int)snapshot["maxActions"]!.GetValue<long>();
 
