@@ -127,6 +127,10 @@ The direct `POST /internal/runs/{runId}/funding` endpoint rejects managed
 runs with `RUN_NOT_ACTIVE`. It remains only for unmanaged legacy runs and
 is removed once the runtime and UI create runs through the lifecycle.
 
+Amended by ADR-0013: the direct account, transfer, savings, bill-payment,
+and obligation routes reject managed runs with `DIRECT_WRITE_NOT_ALLOWED`
+and record the refusal. Researcher reversal (ADR-0006) is unchanged.
+
 ## Schema (migration 008)
 
 On `experiment_runs`, add:

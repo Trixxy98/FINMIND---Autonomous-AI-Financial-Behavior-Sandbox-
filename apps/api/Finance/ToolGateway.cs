@@ -412,6 +412,6 @@ public static class ToolArgumentRedaction
     {
         var withoutControls = new string(text.Where(c => !char.IsControl(c) || c is '\n' or '\t').ToArray());
         var redacted = Credentials.Replace(withoutControls, "[REDACTED]");
-        return redacted.Length <= limit ? redacted : redacted[..limit] + TruncatedMarker;
+        return redacted.Length <= limit ? redacted : TextLimits.Cut(redacted, limit) + TruncatedMarker;
     }
 }

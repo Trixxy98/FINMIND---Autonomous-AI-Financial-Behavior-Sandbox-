@@ -62,7 +62,7 @@ public static class RunLifecycle
         var trimmed = string.IsNullOrWhiteSpace(reason) ? null : reason.Trim();
         if (RequiresReason(to) && trimmed is null)
             throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, $"A reason is required to move a run to {Wire(to)}.");
-        return trimmed is { Length: > 500 } ? trimmed[..500] : trimmed;
+        return trimmed is { Length: > 500 } ? TextLimits.Cut(trimmed, 500) : trimmed;
     }
 
     public static void EnsureTransition(RunStatus? from, RunStatus to)

@@ -611,6 +611,13 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                 ?? throw new LedgerValidationException(LedgerReasonCode.RunNotActive, "Unmanaged runs have no virtual clock.");
             RunLifecycle.EnsureActive(status, RunLifecycle.MoneyMovement);
             var (start, day, duration) = ReadClock(connection, transaction, runId);
+            // Read under the run lock, and written with the clock change, so a retry cannot move it again.
+            if (FinanceCallContext.Current is { } call
+                && EarlierAdvance(connection, transaction, runId, call.TraceId, start, duration) is { } earlier)
+            {
+                transaction.Commit();
+                return earlier;
+            }
             if (day >= duration)
             {
                 transaction.Commit();
@@ -628,6 +635,41 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             var delivered = DeliverDueEvents(connection, transaction, runId, newDay, FinanceEvents.Operations.AdvanceClock, source);
             transaction.Commit();
             return new ClockResult(newDay, start.AddDays(newDay), duration - newDay, newDay == duration, delivered);
+        });
+
+    // ADR-0013 A2: the clock change a tool call already made. A resumed call returns it and does not repeat it.
+    private static ClockResult? EarlierAdvance(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId,
+        string toolCallId, DateOnly start, int duration)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT event_type, payload::text FROM run_events WHERE run_id = @run_id AND trace_id = @trace " +
+            "AND event_type IN ('CLOCK_ADVANCED', 'SCENARIO_EVENT_DELIVERED') ORDER BY sequence", connection, transaction);
+        command.Parameters.AddWithValue("run_id", runId);
+        command.Parameters.AddWithValue("trace", toolCallId);
+        using var reader = command.ExecuteReader();
+        int? toDay = null;
+        var delivered = new List<string>();
+        while (reader.Read())
+        {
+            var payload = JsonNode.Parse(reader.GetString(1))!.AsObject();
+            if (reader.GetString(0) == "CLOCK_ADVANCED") toDay = (int)AgentGatewayRules.Number(payload, "toDay");
+            else delivered.Add(payload["eventKey"]!.GetValue<string>());
+        }
+        return toDay is { } day ? new ClockResult(day, start.AddDays(day), duration - day, day == duration, delivered) : null;
+    }
+
+    // A run never changes between managed and unmanaged (migration 008), so no lock is needed.
+    public void EnsureDirectWriteAllowed(Guid runId, string operation, JsonObject request) =>
+        Record(operation, runId, request, FinanceEvents.InternalApiSource, () =>
+        {
+            using var connection = dataSource.OpenConnection();
+            using var command = new NpgsqlCommand(
+                "SELECT EXISTS (SELECT 1 FROM experiment_runs WHERE id = @id AND status IS NOT NULL)", connection);
+            command.Parameters.AddWithValue("id", runId);
+            if (command.ExecuteScalar() is true)
+                throw new LedgerValidationException(LedgerReasonCode.DirectWriteNotAllowed,
+                    "Managed runs change only through the agent tool gateway.");
+            return true;
         });
 
     public EnvironmentView GetEnvironment(Guid runId)
@@ -1169,7 +1211,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
 
     // ADR-0007: successful operations append their events in their own transaction (see *Core methods).
-    // Rejections roll back, then append POLICY_DENIED in an event-only transaction.
+    // Rejections roll back, then append POLICY_DENIED (or FINANCE_ERROR for internal failures) in an event-only transaction.
     // No decision is returned unless it is recorded.
     private T Record<T>(string operation, Guid runId, JsonObject request, string source, Func<T> body)
     {
@@ -1180,7 +1222,8 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         catch (LedgerException exception)
         {
             if (FinanceEvents.IsRecordable(runId, exception))
-                AppendEventOnly(runId, FinanceEvents.PolicyDenied(operation, exception, request, source), required: true);
+                AppendEventOnly(runId, FinanceEvents.Rejection(operation, exception, request, source),
+                    required: exception.Outcome != LedgerOutcome.InternalError);
             throw;
         }
         catch (Exception)

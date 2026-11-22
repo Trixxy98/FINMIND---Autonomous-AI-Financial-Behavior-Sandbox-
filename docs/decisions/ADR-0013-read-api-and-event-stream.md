@@ -1,6 +1,6 @@
 # FINMIND ADR 0013: Researcher Read API and Event Stream
 
-- Status: Part A accepted (A1 implemented; A2 to A4 pending); Part B proposed
+- Status: Part A accepted (A1 and A2 implemented; A3, A4, and items 16 and 17 pending); Part B proposed
 - Date: 22 November 2026
 - Scope: prerequisite corrections to Phase 2, then the read API and SSE stream for the Phase 3 UI
 
@@ -48,6 +48,23 @@ Evidence: **R** reproduced on 22 November 2026, **C** found by reading code.
 | 9 | The event hash omits `trace_id`, `virtual_time`, `reason_code`, `outcome`, and the other promoted columns. Verification passes if they are altered | C | Hash scheme v2 over every stored field; keep v1 for old events |
 | 10 | The 500 response always says ledger state did not change, which is false after a timeout following commit | R (message), C (timeout) | Say the outcome is unknown and to retry with the same key |
 | 11 | Truncation can split a surrogate pair. PostgreSQL rejects the lone surrogate as JSONB, so an agent's text with an emoji at the limit makes recording fail | R (split and JSONB rejection), C (effect on the run) | Truncate on a code point boundary |
+
+#### A2 as implemented (migration 014)
+
+- A `wait` is bound to its `toolCallId` by the clock event written in the
+  same transaction as the clock change.
+- Direct routes refuse managed runs with `DIRECT_WRITE_NOT_ALLOWED`.
+  Researcher reversal and lifecycle routes are unchanged.
+- Hash v2 applies to new events. v1 events still verify and stay blind to
+  their promoted columns.
+- A failed write answers `committed: null`.
+
+#### Found while implementing A2: not yet approved
+
+| # | Defect | Evidence | Proposed correction |
+|---|---|---|---|
+| 16 | A tool call that committed, then lost its response, is recorded as `denied` with `committed: false` if the run stops before the retry | R | On resume, look up what the `toolCallId` committed before applying the run-status check, and return that |
+| 17 | A lone surrogate sent by the agent (tool arguments, name, or output text) makes the API return 500 before the attempt is recorded, so the run fails | R | Replace invalid code units at the gateway and record the attempt as malformed |
 
 ### A3. Trust boundary
 

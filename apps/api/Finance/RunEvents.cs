@@ -254,6 +254,12 @@ public static class FinanceEvents
     public static string SourceFor(ReversalInitiator? initiator) =>
         initiator == ReversalInitiator.ScenarioEngine ? ScenarioEngineSource : InternalApiSource;
 
+    // ADR-0007: an internal failure is an error, whatever exception type carried it; it is not a denial.
+    public static PendingEvent Rejection(string operation, LedgerException exception, JsonObject request, string source) =>
+        exception.Outcome == LedgerOutcome.InternalError
+            ? FinanceError(operation, exception.ReasonCode, request["idempotencyKey"]?.GetValue<string>(), source)
+            : PolicyDenied(operation, exception, request, source);
+
     // Records a rejection only when the run is recordable (ADR-0007 "Unrecordable requests").
     public static bool IsRecordable(Guid runId, LedgerException exception) =>
         runId != Guid.Empty && exception.ReasonCode != LedgerReasonCode.RunNotFound;

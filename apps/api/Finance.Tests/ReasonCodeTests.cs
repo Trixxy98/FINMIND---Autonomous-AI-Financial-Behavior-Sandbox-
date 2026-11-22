@@ -160,7 +160,7 @@ public sealed class ReasonCodeTests
         Assert.Equal(statusCode, actualStatusCode);
         Assert.Equal(status, body.Status);
         Assert.Equal(LedgerReasonCodes.ToWireValue(code), body.ReasonCode);
-        Assert.False(body.Committed);
+        Assert.Equal(statusCode == 500 ? null : (bool?)false, body.Committed); // ADR-0013: unknown on 500
         Assert.Null(body.JournalId);
     }
 

@@ -238,10 +238,20 @@ event_hash = sha256(convert_to(
 - `payload::text` is PostgreSQL's deterministic JSONB text form. Exports
   must include this exact text so an external verifier can recompute the
   hash.
-- Promoted columns are copies of payload values and are not hashed
-  separately.
+- Promoted columns are not covered by v1. Several are not copies of payload
+  values, so altering them in a v1 event goes undetected (see v2).
 - The `finmind-event-v1` prefix versions the scheme. A future change uses
   a new prefix; old events keep their original scheme.
+
+### Scheme v2 (ADR-0013, migration 014)
+
+Events inserted after migration 014 have `hash_version = 2`:
+`sha256('finmind-event-v2' || E'\n' || <JSONB object of every stored field
+except event_hash>::text)`, with both timestamps as UTC text. The definition
+is `finmind_run_event_hash_v2`. Older events keep v1 and its blind spot.
+Within a run the scheme never returns from v2 to v1. As before, someone who
+can rewrite the whole chain, or drop its tail, is not detected without
+external anchoring.
 
 A SQL function `finmind_verify_run_events(run_id)` recomputes the chain
 and returns the first sequence whose hash or link does not match, or NULL

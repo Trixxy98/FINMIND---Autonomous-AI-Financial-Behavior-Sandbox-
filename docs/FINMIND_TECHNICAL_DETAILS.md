@@ -98,8 +98,10 @@ finance operations.
 `infra/db/migrations/006_run_events.sql` adds the append-only `run_events`
 log (ADR-0007). Successful finance operations write their events in the
 same transaction as the ledger change; rejections are recorded as
-`POLICY_DENIED` in a separate event-only transaction. PostgreSQL assigns
-each event's per-run sequence and SHA-256 hash link;
+`POLICY_DENIED` in a separate event-only transaction, and internal
+failures as `FINANCE_ERROR`. PostgreSQL assigns each event's per-run
+sequence and SHA-256 hash link (scheme v2, covering every stored field,
+from migration 014; older events keep v1);
 `finmind_verify_run_events(run_id)` detects a broken chain. Tool-call,
 model, and scenario events arrive with the Phase 2 runtime.
 

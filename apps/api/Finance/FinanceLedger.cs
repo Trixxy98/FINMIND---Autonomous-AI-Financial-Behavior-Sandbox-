@@ -43,6 +43,8 @@ public interface IFinanceLedger
     RunInfo TransitionRun(Guid runId, RunStatus to, string? reason, string source);
     OpenRunResult ActivateRun(Guid runId, string source);
     ClockResult AdvanceClock(Guid runId, int days, string source);
+    // ADR-0013 A2: direct finance routes never change a managed run. A refusal is recorded.
+    void EnsureDirectWriteAllowed(Guid runId, string operation, JsonObject request);
     EnvironmentView GetEnvironment(Guid runId);
 
     // ADR-0009 gateway support. Token hashes are SHA-256 of the session token; tokens are never stored.
@@ -805,6 +807,8 @@ public sealed class InMemoryLedger : IFinanceLedger
             RunLifecycle.EnsureActive(status, RunLifecycle.MoneyMovement);
             var run = _managedRuns[runId];
             var duration = RunConfiguration.DurationDays(run.Snapshot);
+            if (FinanceCallContext.Current is { } call && EarlierAdvance(runId, run, call.TraceId, duration) is { } earlier)
+                return earlier;
             var day = run.VirtualDay!.Value;
             if (day >= duration) return new ClockResult(day, run.VirtualStart!.Value.AddDays(day), 0, true, []);
 
@@ -813,6 +817,27 @@ public sealed class InMemoryLedger : IFinanceLedger
             Emit(FinanceEvents.ClockAdvanced(day, newDay, days, source));
             var delivered = DeliverDueEvents(runId, run, newDay, FinanceEvents.Operations.AdvanceClock, source);
             return new ClockResult(newDay, run.VirtualStart!.Value.AddDays(newDay), duration - newDay, newDay == duration, delivered);
+        });
+
+    // ADR-0013 A2: the clock change a tool call already made. A resumed call returns it and does not repeat it.
+    private ClockResult? EarlierAdvance(Guid runId, ManagedRun run, string toolCallId, int duration)
+    {
+        if (!_events.TryGetValue(runId, out var events)) return null;
+        var ofCall = events.Where(e => e.TraceId == toolCallId).ToArray();
+        if (ofCall.FirstOrDefault(e => e.EventType == "CLOCK_ADVANCED") is not { } advanced) return null;
+        var day = (int)AgentGatewayRules.Number(advanced.Payload, "toDay");
+        var delivered = ofCall.Where(e => e.EventType == "SCENARIO_EVENT_DELIVERED")
+            .Select(e => e.Payload["eventKey"]!.GetValue<string>()).ToArray();
+        return new ClockResult(day, run.VirtualStart!.Value.AddDays(day), duration - day, day == duration, delivered);
+    }
+
+    public void EnsureDirectWriteAllowed(Guid runId, string operation, JsonObject request) =>
+        Record(operation, runId, request, FinanceEvents.InternalApiSource, () =>
+        {
+            if (_managedRuns.ContainsKey(runId))
+                throw new LedgerValidationException(LedgerReasonCode.DirectWriteNotAllowed,
+                    "Managed runs change only through the agent tool gateway.");
+            return true;
         });
 
     public EnvironmentView GetEnvironment(Guid runId)
@@ -1084,7 +1109,7 @@ public sealed class InMemoryLedger : IFinanceLedger
         if (to is RunStatus.Completed or RunStatus.Failed or RunStatus.Cancelled or RunStatus.BudgetExceeded) run.FinishedAt = now;
     }
 
-    // ADR-0007: an operation's events are buffered and stored only if it succeeds; a rejection stores POLICY_DENIED instead.
+    // ADR-0007: an operation's events are buffered and stored only if it succeeds; a rejection stores POLICY_DENIED or FINANCE_ERROR instead.
     private T Record<T>(string operation, Guid runId, JsonObject request, string source, Func<T> body)
     {
         lock (_gate)
@@ -1100,7 +1125,7 @@ public sealed class InMemoryLedger : IFinanceLedger
             catch (LedgerException exception)
             {
                 if (FinanceEvents.IsRecordable(runId, exception))
-                    StoreEvent(runId, FinanceEvents.PolicyDenied(operation, exception, request, source));
+                    StoreEvent(runId, FinanceEvents.Rejection(operation, exception, request, source));
                 throw;
             }
             catch (Exception)

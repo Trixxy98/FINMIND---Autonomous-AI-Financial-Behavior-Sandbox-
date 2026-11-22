@@ -105,6 +105,7 @@ app.MapPost("/internal/runs/{runId:guid}/accounts", (Guid runId, CreateAccountRe
 
     return Execute(() =>
     {
+        ledger.EnsureDirectWriteAllowed(runId, FinanceEvents.Operations.CreateAccount, FinanceEvents.Request(("kind", kind)));
         var accountId = ledger.CreateAccount(runId, kind);
         return Results.Created($"/internal/runs/{runId}/accounts/{accountId}", new { accountId, runId, kind = kind.ToString(), currency = "MYR" });
     });
@@ -133,13 +134,31 @@ app.MapPost("/internal/runs/{runId:guid}/funding", (Guid runId, FundingRequest r
     }));
 
 app.MapPost("/internal/runs/{runId:guid}/transfers", (Guid runId, TransferRequest request, PostgresLedger ledger) =>
-    Execute(() => CommitResponse(ledger.Transfer(runId, request.IdempotencyKey, request.SourceAccountId, request.DestinationAccountId, request.AmountSen))));
+    Execute(() =>
+    {
+        ledger.EnsureDirectWriteAllowed(runId, FinanceEvents.Operations.Transfer, FinanceEvents.Request(
+            ("idempotencyKey", request.IdempotencyKey), ("sourceAccountId", request.SourceAccountId),
+            ("destinationAccountId", request.DestinationAccountId), ("amountSen", request.AmountSen)));
+        return CommitResponse(ledger.Transfer(runId, request.IdempotencyKey, request.SourceAccountId, request.DestinationAccountId, request.AmountSen));
+    }));
 
 app.MapPost("/internal/runs/{runId:guid}/savings", (Guid runId, SavingsRequest request, PostgresLedger ledger) =>
-    Execute(() => CommitResponse(ledger.MoveToSavings(runId, request.IdempotencyKey, request.CashAccountId, request.SavingsAccountId, request.AmountSen))));
+    Execute(() =>
+    {
+        ledger.EnsureDirectWriteAllowed(runId, FinanceEvents.Operations.MoveToSavings, FinanceEvents.Request(
+            ("idempotencyKey", request.IdempotencyKey), ("cashAccountId", request.CashAccountId),
+            ("savingsAccountId", request.SavingsAccountId), ("amountSen", request.AmountSen)));
+        return CommitResponse(ledger.MoveToSavings(runId, request.IdempotencyKey, request.CashAccountId, request.SavingsAccountId, request.AmountSen));
+    }));
 
 app.MapPost("/internal/runs/{runId:guid}/bill-payments", (Guid runId, BillPaymentRequest request, PostgresLedger ledger) =>
-    Execute(() => CommitResponse(ledger.PayObligation(runId, request.IdempotencyKey, request.CashAccountId, request.ObligationId))));
+    Execute(() =>
+    {
+        ledger.EnsureDirectWriteAllowed(runId, FinanceEvents.Operations.PayObligation, FinanceEvents.Request(
+            ("idempotencyKey", request.IdempotencyKey), ("cashAccountId", request.CashAccountId),
+            ("obligationId", request.ObligationId)));
+        return CommitResponse(ledger.PayObligation(runId, request.IdempotencyKey, request.CashAccountId, request.ObligationId));
+    }));
 
 // ADR-0006: researcher-initiated full reversal. The initiator is set here, never read from the body.
 // Unauthenticated localhost-only scaffolding; the agent tool gateway must never expose this route.
@@ -148,7 +167,13 @@ app.MapPost("/internal/runs/{runId:guid}/journals/{journalId:guid}/reversals", (
 
 // Obligation setup never moves money; success keeps returning the stored obligation.
 app.MapPost("/internal/runs/{runId:guid}/obligations", (Guid runId, CreateObligationRequest request, PostgresLedger ledger) =>
-    Execute(() => Results.Ok(ledger.CreateObligation(runId, request.MerchantAccountId, request.AmountSen, request.InvoiceReference))));
+    Execute(() =>
+    {
+        ledger.EnsureDirectWriteAllowed(runId, FinanceEvents.Operations.CreateObligation, FinanceEvents.Request(
+            ("merchantAccountId", request.MerchantAccountId), ("amountSen", request.AmountSen),
+            ("invoiceReference", request.InvoiceReference)));
+        return Results.Ok(ledger.CreateObligation(runId, request.MerchantAccountId, request.AmountSen, request.InvoiceReference));
+    }));
 
 app.MapGet("/internal/runs/{runId:guid}/obligations/{obligationId:guid}", (Guid runId, Guid obligationId, PostgresLedger ledger) =>
     Execute(() => Results.Ok(ledger.GetObligation(runId, obligationId)), isRead: true));

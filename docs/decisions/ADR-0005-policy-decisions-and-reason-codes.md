@@ -31,7 +31,7 @@ Every finance boundary call ends in exactly one outcome:
 | `malformed` | The request is structurally invalid | No |
 | `denied` | The request is well formed but policy or state forbids it | No |
 | `conflict` | An identity key was reused with different details | No |
-| `internal_error` | A platform defect or transient failure | No (transaction rolled back) |
+| `internal_error` | A platform defect or transient failure | Unknown to the caller: a timeout can follow a commit (amended by ADR-0013) |
 
 `unsupported_capability` is reserved for the Phase 2 tool gateway. The
 finance boundary does not use it because it only exposes typed methods.
@@ -138,6 +138,11 @@ Catalog `finance-reasons/v5` (ADR-0011) adds `WALL_TIME_BUDGET_EXCEEDED`
 and `TOKEN_BUDGET_EXCEEDED` (denied).
 
 Catalog `finance-reasons/v6` (ADR-0012) adds `COST_BUDGET_EXCEEDED` (denied).
+
+Catalog `finance-reasons/v7` (ADR-0013) adds `DIRECT_WRITE_NOT_ALLOWED`
+(denied). ADR-0013 also amends 500 responses: on a write, `committed` is
+`null` (unknown) and the message says to retry with the same idempotency key
+or request ID. A failed read keeps `committed: false`.
 
 ## Out of scope
 

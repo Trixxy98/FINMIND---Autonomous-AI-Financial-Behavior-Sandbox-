@@ -17,9 +17,15 @@ RETRY_DELAYS = (0.5, 1.0, 2.0)
 TIMEOUT_SECONDS = 10.0
 # ADR-0013 A1: stay inside the gateway's limits, so a record is never lost to a rejected request.
 MAX_TOOL_CALL_BYTES = 16_384
-MAX_TOOL_NAME_CHARS = 100
+MAX_TOOL_NAME_UNITS = 100  # UTF-16 code units, as the server counts
 MAX_OUTPUT_TEXT_UNITS = 90_000  # UTF-16 code units, as the server counts
 MAX_TOOL_USE_COUNT = 100
+
+
+def cut(text: str, max_units: int) -> str:
+    """At most max_units UTF-16 units, never half a surrogate pair."""
+    encoded = text.encode("utf-16-le", "replace")
+    return text if len(encoded) <= 2 * max_units else encoded[:2 * max_units].decode("utf-16-le", "ignore")
 
 
 class SessionEnded(Exception):
@@ -80,9 +86,7 @@ class Client:
     def model_invocation(self, turn: int, input_tokens: int, output_tokens: int, latency_ms: int, output_text: str,
                          **extra: Any) -> Dict[str, Any]:
         """extra: cacheReadInputTokens, cacheCreationInputTokens, model, stopReason, refusalCategory, toolUseCount."""
-        encoded = output_text.encode("utf-16-le", "replace")
-        if len(encoded) > 2 * MAX_OUTPUT_TEXT_UNITS:
-            output_text = encoded[:2 * MAX_OUTPUT_TEXT_UNITS].decode("utf-16-le", "ignore")
+        output_text = cut(output_text, MAX_OUTPUT_TEXT_UNITS)
         payload = {"turn": turn, "inputTokens": input_tokens, "outputTokens": output_tokens,
                    "latencyMs": min(latency_ms, 3_600_000), "outputText": output_text}
         if extra.get("toolUseCount") is not None:
@@ -91,7 +95,7 @@ class Client:
         return self._session("/internal/worker/session/model-invocations", payload)
 
     def tool_call(self, tool_call_id: str, tool: str, arguments: Any) -> Dict[str, Any]:
-        payload = {"toolCallId": tool_call_id, "tool": tool[:MAX_TOOL_NAME_CHARS] or "(empty)", "arguments": arguments}
+        payload = {"toolCallId": tool_call_id, "tool": cut(tool, MAX_TOOL_NAME_UNITS) or "(empty)", "arguments": arguments}
         size = len(json.dumps(payload).encode("utf-8"))
         if size > MAX_TOOL_CALL_BYTES:
             # No tool accepts this field, so the gateway records the attempt as malformed and the agent is told.
