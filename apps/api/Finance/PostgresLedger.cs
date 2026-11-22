@@ -1100,11 +1100,17 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
     }
 
     // Stores the result and TOOL_RETURNED (plus any agent event such as FUNDING_REQUESTED) in one transaction.
-    public void CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion)
+    public JsonObject CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion)
     {
         using var connection = dataSource.OpenConnection();
         using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
         LockExistingRun(connection, transaction, runId);
+        if (RecordedResponse(connection, transaction, runId, toolCallId) is { } recorded)
+        {
+            transaction.Commit();
+            return recorded;
+        }
+        if (completion.IsRejection) completion = CommittedByCall(connection, transaction, runId, toolCallId) ?? completion;
         using var update = new NpgsqlCommand(
             "UPDATE tool_calls SET outcome = @outcome, reason_code = @reason, journal_id = @journal, response = @response, " +
             "completed_at = now() WHERE run_id = @run_id AND tool_call_id = @id AND completed_at IS NULL", connection, transaction);
@@ -1121,6 +1127,48 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                 FinanceEvents.ToolReturned(toolCallId, tool, completion.Status, completion.ReasonCode, completion.JournalId));
         }
         transaction.Commit();
+        return completion.Response;
+    }
+
+    private static JsonObject? RecordedResponse(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, string toolCallId)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT response::text FROM tool_calls WHERE run_id = @run_id AND tool_call_id = @id AND completed_at IS NOT NULL",
+            connection, transaction);
+        command.Parameters.AddWithValue("run_id", runId);
+        command.Parameters.AddWithValue("id", toolCallId);
+        return command.ExecuteScalar() is string response ? JsonNode.Parse(response)!.AsObject() : null;
+    }
+
+    // ADR-0013 item 16: what this call already did, whatever the run's status is now.
+    private static ToolCallCompletion? CommittedByCall(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        Guid runId, string toolCallId)
+    {
+        string? eventType = null;
+        Guid? journalId = null;
+        using (var command = new NpgsqlCommand(
+            "SELECT event_type, journal_id FROM run_events WHERE run_id = @run_id AND trace_id = @trace " +
+            "AND event_type IN ('LEDGER_COMMITTED', 'LEDGER_REPLAYED', 'CLOCK_ADVANCED') ORDER BY sequence LIMIT 1",
+            connection, transaction))
+        {
+            command.Parameters.AddWithValue("run_id", runId);
+            command.Parameters.AddWithValue("trace", toolCallId);
+            using var reader = command.ExecuteReader();
+            if (reader.Read())
+            {
+                eventType = reader.GetString(0);
+                if (!reader.IsDBNull(1)) journalId = reader.GetGuid(1);
+            }
+        }
+        if (eventType is null) return null;
+        if (journalId is { } id)
+        {
+            var journal = LoadJournalById(connection, transaction, runId, id)!;
+            return ToolGateway.AlreadyCommitted(ReplayResult(connection, transaction, journal));
+        }
+        var (start, _, duration) = ReadClock(connection, transaction, runId);
+        return EarlierAdvance(connection, transaction, runId, toolCallId, start, duration) is { } clock
+            ? ToolGateway.AlreadyWaited(clock) : null;
     }
 
     public AgentView GetAgentView(Guid runId)
@@ -1316,6 +1364,11 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             AppendEvent(connection, transaction, request.RunId, FinanceEvents.LedgerReplayed(operation, replay, request.IdempotencyKey));
             return replay;
         }
+
+        // The run lock is held, so a call cannot finish between this check and the commit (ADR-0013 item 16).
+        if (FinanceCallContext.Current is { } call
+            && RecordedResponse(connection, transaction, request.RunId, call.TraceId) is not null)
+            throw new IdempotencyConflictException(LedgerReasonCode.ToolCallIdConflict, "This tool call has already finished.");
 
         var accountKinds = LoadAccountKinds(connection, transaction, request.RunId, request.Postings);
         ValidateJournalShape(request, accountKinds);

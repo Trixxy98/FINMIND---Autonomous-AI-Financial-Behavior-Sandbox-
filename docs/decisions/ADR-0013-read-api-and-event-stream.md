@@ -1,6 +1,6 @@
 # FINMIND ADR 0013: Researcher Read API and Event Stream
 
-- Status: Part A accepted (A1 and A2 implemented; A3, A4, and items 16 and 17 pending); Part B proposed
+- Status: Part A accepted (A1, A2, and items 16 and 17 implemented; A3 and A4 pending; item 18 proposed); Part B proposed
 - Date: 22 November 2026
 - Scope: prerequisite corrections to Phase 2, then the read API and SSE stream for the Phase 3 UI
 
@@ -59,12 +59,33 @@ Evidence: **R** reproduced on 22 November 2026, **C** found by reading code.
   their promoted columns.
 - A failed write answers `committed: null`.
 
-#### Found while implementing A2: not yet approved
+#### Found while implementing A2: approved 22 November 2026
+
+| # | Defect | Evidence | Correction |
+|---|---|---|---|
+| 16 | A tool call that committed but was not completed (interrupted, or still in flight) is recorded as `denied` with `committed: false` if a retry passes the session check and the run then stops | R | On resume, look up what the `toolCallId` committed before applying the run-status check, and return that |
+| 17 | A lone surrogate sent by the agent (tool arguments, name, or output text) makes the API return 500 before the attempt is recorded, so the run fails | R | Replace invalid code units at the gateway and record the attempt as malformed |
+
+#### Items 16 and 17 as implemented
+
+- Item 16 was first reported too broadly. A response lost after completion
+  was always recorded correctly, and a retry after cancellation gets 401.
+  The false record needed the race now described in the table.
+- A rejection is checked, under the run lock, against what that `toolCallId`
+  committed. The recorded response is the one returned, and a finished call
+  cannot commit later.
+- A call interrupted before completion whose run then stops has no
+  `TOOL_RETURNED`, because its retry gets 401. Part B must take "committed"
+  from the ledger event, not from the tool-call outcome.
+- Invalid Unicode becomes U+FFFD. A tool call holding it is recorded as
+  malformed and never executed; a usage report is recorded with the
+  replaced text.
+
+#### Found while implementing items 16 and 17: not yet approved
 
 | # | Defect | Evidence | Proposed correction |
 |---|---|---|---|
-| 16 | A tool call that committed, then lost its response, is recorded as `denied` with `committed: false` if the run stops before the retry | R | On resume, look up what the `toolCallId` committed before applying the run-status check, and return that |
-| 17 | A lone surrogate sent by the agent (tool arguments, name, or output text) makes the API return 500 before the attempt is recorded, so the run fails | R | Replace invalid code units at the gateway and record the attempt as malformed |
+| 18 | Other unreadable tool calls are not recorded: nesting over 64 levels or a non-finite number (400), a name of only control characters or a duplicate key (500). The first three can come through the worker and fail the run | R | One fallback at the gateway: record any tool call it cannot read as malformed, with its size and hash |
 
 ### A3. Trust boundary
 

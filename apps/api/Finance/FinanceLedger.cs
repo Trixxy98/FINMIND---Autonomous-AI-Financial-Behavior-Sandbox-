@@ -55,7 +55,8 @@ public interface IFinanceLedger
     ModelReservationResult ReserveModelCall(Guid runId, ModelReservation reservation);
     Guid? ResolveSession(byte[] tokenHash, DateTimeOffset now, DateTimeOffset newExpiresAt);
     ToolCallBegin BeginToolCall(Guid runId, string toolCallId, string tool, JsonObject redactedArguments, string requestHash);
-    void CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion);
+    // Returns the response that is on record, which may differ from the one offered (ADR-0013 item 16).
+    JsonObject CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion);
     AgentView GetAgentView(Guid runId);
     ModelInvocationResult RecordModelInvocation(Guid runId, ModelInvocation invocation);
 }
@@ -416,6 +417,10 @@ public sealed class InMemoryLedger : IFinanceLedger
                 Emit(FinanceEvents.LedgerReplayed(operation, replay, request.IdempotencyKey));
                 return replay;
             }
+
+            if (FinanceCallContext.Current is { } call
+                && _toolCalls.TryGetValue((request.RunId, call.TraceId), out var recorded) && recorded.Response is not null)
+                throw new IdempotencyConflictException(LedgerReasonCode.ToolCallIdConflict, "This tool call has already finished.");
 
             ValidateAccountsAndShape(request);
 
@@ -1058,19 +1063,33 @@ public sealed class InMemoryLedger : IFinanceLedger
         }
     }
 
-    public void CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion)
+    public JsonObject CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion)
     {
         lock (_gate)
         {
             var record = _toolCalls[(runId, toolCallId)];
-            if (record.Response is not null) return;
+            if (record.Response is not null) return (JsonObject)record.Response.DeepClone();
+            if (completion.IsRejection) completion = CommittedByCall(runId, toolCallId) ?? completion;
             if (completion.ExtraEvent is { } extra) StoreEvent(runId, extra);
             record.Response = (JsonObject)completion.Response.DeepClone();
             record.Outcome = completion.Status;
             record.ReasonCode = completion.ReasonCode;
             record.JournalId = completion.JournalId;
             StoreEvent(runId, FinanceEvents.ToolReturned(toolCallId, tool, completion.Status, completion.ReasonCode, completion.JournalId));
+            return completion.Response;
         }
+    }
+
+    // ADR-0013 item 16: what this call already did, whatever the run's status is now.
+    private ToolCallCompletion? CommittedByCall(Guid runId, string toolCallId)
+    {
+        if (!_events.TryGetValue(runId, out var events)) return null;
+        var journalId = events.FirstOrDefault(e =>
+            e.TraceId == toolCallId && e.EventType is "LEDGER_COMMITTED" or "LEDGER_REPLAYED")?.JournalId;
+        if (journalId is { } id) return ToolGateway.AlreadyCommitted(ReplayResult(_journalsById[id]));
+        if (!_managedRuns.TryGetValue(runId, out var run) || run.VirtualDay is null) return null;
+        return EarlierAdvance(runId, run, toolCallId, RunConfiguration.DurationDays(run.Snapshot)) is { } clock
+            ? ToolGateway.AlreadyWaited(clock) : null;
     }
 
     public AgentView GetAgentView(Guid runId)

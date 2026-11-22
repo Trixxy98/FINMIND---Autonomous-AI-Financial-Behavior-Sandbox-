@@ -236,6 +236,10 @@ Model messages and token usage are runtime events defined in ADR-0011.
   accounts, otherwise `ACCOUNT_NOT_IN_RUN`). These rejections appear in
   `TOOL_RETURNED` and the tool-call record, not as ledger `POLICY_DENIED`
   events, because the ledger is never called.
+- Amended by ADR-0013 items 16 and 17: a rejection never overwrites what
+  the same `toolCallId` committed, the response returned is always the one
+  recorded, and arguments or names with invalid Unicode are recorded as
+  `INVALID_TOOL_ARGUMENTS` with the field `(invalid_unicode)`.
 - Amended by ADR-0013: a resumed `wait` finds its `CLOCK_ADVANCED` event by
   `toolCallId` under the run lock and returns that result without moving
   the clock again.

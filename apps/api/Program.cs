@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Finmind.Api.Finance;
 using Npgsql;
@@ -261,24 +262,43 @@ if (workerToken is { Length: >= 32 })
         }
 
         JsonObject? body;
-        try { body = JsonNode.Parse(buffer.AsSpan(0, length))?.AsObject(); }
+        var hadInvalidUnicode = false;
+        try
+        {
+            (var parsed, hadInvalidUnicode) = AgentText.Parse(buffer.AsSpan(0, length));
+            body = parsed?.AsObject();
+        }
         catch (Exception) { body = null; }
         if (body is null || body.Any(p => p.Key is not ("toolCallId" or "tool" or "arguments"))
             || (string?)(body["toolCallId"] as JsonValue) is not { } toolCallId || !ToolGateway.IsValidToolCallId(toolCallId)
             || (string?)(body["tool"] as JsonValue) is not { Length: >= 1 and <= 100 } tool)
             return Results.BadRequest(new { error = "Body must be { toolCallId, tool, arguments } with a printable toolCallId of 1-100 characters." });
 
-        return Execute(() => Results.Json(gateway.Execute(runId, toolCallId, tool, body["arguments"]?.DeepClone())));
+        return Execute(() => Results.Json(gateway.Execute(runId, toolCallId, tool, body["arguments"]?.DeepClone(), hadInvalidUnicode)));
     });
 
     worker.MapPost("/session/model-reservations", (HttpRequest request, JsonObject? body, ToolGateway gateway) =>
         WithSession(request, gateway, runId => Execute(() => Results.Json(gateway.ReserveModelCall(runId, body)))));
 
     // The only route that accepts a revoked or expired session: it can only report usage (ADR-0013 A1).
-    worker.MapPost("/session/model-invocations", (HttpRequest request, JsonObject? body, ToolGateway gateway) =>
-        gateway.ResolveSessionForUsage(Bearer(request)) is { } runId
-            ? Execute(() => Results.Json(gateway.RecordModelInvocation(runId, body)))
-            : Results.StatusCode(401));
+    // Read raw, so that invalid Unicode in the model's text is replaced and does not lose the usage (ADR-0013 item 17).
+    worker.MapPost("/session/model-invocations", async (HttpRequest request, ToolGateway gateway) =>
+    {
+        if (gateway.ResolveSessionForUsage(Bearer(request)) is not { } runId) return Results.StatusCode(401);
+        using var raw = new MemoryStream();
+        var chunk = new byte[16_384];
+        int count;
+        while ((count = await request.Body.ReadAsync(chunk)) > 0)
+        {
+            if (raw.Length + count > 1_048_576) return Results.StatusCode(413);
+            raw.Write(chunk, 0, count);
+        }
+
+        JsonNode? body;
+        try { body = AgentText.Parse(raw.ToArray()).Body; }
+        catch (JsonException) { return Results.BadRequest(new { error = "Body must be JSON." }); }
+        return Execute(() => Results.Json(gateway.RecordModelInvocation(runId, body)));
+    });
 
     worker.MapPost("/session/finish", (HttpRequest request, FinishRunRequest finish, ToolGateway gateway, PostgresLedger ledger) =>
         WithSession(request, gateway, runId => Execute(() =>

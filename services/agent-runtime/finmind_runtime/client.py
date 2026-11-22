@@ -23,9 +23,13 @@ MAX_TOOL_USE_COUNT = 100
 
 
 def cut(text: str, max_units: int) -> str:
-    """At most max_units UTF-16 units, never half a surrogate pair."""
-    encoded = text.encode("utf-16-le", "replace")
-    return text if len(encoded) <= 2 * max_units else encoded[:2 * max_units].decode("utf-16-le", "ignore")
+    """At most max_units UTF-16 units, never half a pair. A lone surrogate is kept for the gateway to judge."""
+    used = 0
+    for index, char in enumerate(text):
+        used += 2 if ord(char) > 0xFFFF else 1
+        if used > max_units:
+            return text[:index]
+    return text
 
 
 class SessionEnded(Exception):

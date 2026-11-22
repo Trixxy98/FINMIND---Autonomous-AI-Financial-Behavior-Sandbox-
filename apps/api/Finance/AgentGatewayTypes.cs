@@ -8,7 +8,10 @@ public enum ToolCallBeginKind { New, Resume, Replay, Conflict }
 // Denial is set when the call was recorded but must not execute (run not active, budget exhausted).
 public sealed record ToolCallBegin(ToolCallBeginKind Kind, JsonObject? StoredResponse, LedgerReasonCode? Denial);
 
-public sealed record ToolCallCompletion(JsonObject Response, string Status, string? ReasonCode, Guid? JournalId, PendingEvent? ExtraEvent);
+public sealed record ToolCallCompletion(JsonObject Response, string Status, string? ReasonCode, Guid? JournalId, PendingEvent? ExtraEvent)
+{
+    public bool IsRejection => Status is not ("ok" or "committed" or "replayed");
+}
 
 // ADR-0011: Replayed is true when this turn was already recorded (a worker retry); tokens are not counted twice.
 public sealed record ModelInvocationResult(LedgerReasonCode? Denial, bool Replayed, long TokensUsed, long CostMicroUsd = 0);

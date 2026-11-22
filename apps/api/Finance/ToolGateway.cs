@@ -121,10 +121,12 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
     }
 
     // Returns the agent-facing response. Throws on internal errors so the worker can retry the same toolCallId.
-    public JsonObject Execute(Guid runId, string toolCallId, string tool, JsonNode? arguments)
+    // hadInvalidUnicode: the body was repaired by AgentText, so it is recorded but never executed.
+    public JsonObject Execute(Guid runId, string toolCallId, string tool, JsonNode? arguments, bool hadInvalidUnicode = false)
     {
         var redacted = ToolArgumentRedaction.Redact(arguments);
-        var requestHash = RequestHash(tool, arguments);
+        // Repaired text must not pass for a request that really contained U+FFFD.
+        var requestHash = RequestHash(hadInvalidUnicode ? "invalid-unicode\n" + tool : tool, arguments);
         var safeTool = ToolArgumentRedaction.RedactName(tool);
 
         var begin = ledger.BeginToolCall(runId, toolCallId, safeTool, redacted, requestHash);
@@ -138,6 +140,13 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
 
         if (begin.Denial is { } denial)
             return Complete(runId, toolCallId, safeTool, Rejected(denial));
+
+        if (hadInvalidUnicode)
+        {
+            var unreadable = Rejected(LedgerReasonCode.InvalidToolArguments);
+            unreadable["data"] = new JsonObject { ["fields"] = new JsonArray("(invalid_unicode)") };
+            return Complete(runId, toolCallId, safeTool, unreadable);
+        }
 
         if (!ToolCatalog.Tools.TryGetValue(tool, out var definition))
         {
@@ -263,14 +272,7 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
             case "wait":
             {
                 var clock = ledger.AdvanceClock(runId, Int(args, "days")!.Value, FinanceEvents.AgentSource);
-                return (Ok(new JsonObject
-                {
-                    ["day"] = clock.Day,
-                    ["virtual_date"] = clock.VirtualDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-                    ["days_remaining"] = clock.DaysRemaining,
-                    ["duration_reached"] = clock.DurationReached,
-                    ["delivered_count"] = clock.DeliveredEventKeys.Count
-                }), null);
+                return (Waited(clock), null);
             }
 
             case "finish":
@@ -314,12 +316,25 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
 
     private JsonObject Complete(Guid runId, string toolCallId, string tool, JsonObject response, PendingEvent? extra = null)
     {
-        var status = (string)response["status"]!;
-        ledger.CompleteToolCall(runId, toolCallId, tool, new ToolCallCompletion(
-            response, status, (string?)response["reason_code"],
-            response["journal_id"] is JsonValue id ? Guid.Parse((string)id!) : null, extra));
-        return response;
+        return ledger.CompleteToolCall(runId, toolCallId, tool, Completion(response, extra));
     }
+
+    private static ToolCallCompletion Completion(JsonObject response, PendingEvent? extra = null) => new(
+        response, (string)response["status"]!, (string?)response["reason_code"],
+        response["journal_id"] is JsonValue id ? Guid.Parse((string)id!) : null, extra);
+
+    // ADR-0013 item 16: the ledgers record these instead of a rejection when the call had already taken effect.
+    internal static ToolCallCompletion AlreadyCommitted(CommitResult replay) => Completion(Money(replay));
+    internal static ToolCallCompletion AlreadyWaited(ClockResult clock) => Completion(Waited(clock));
+
+    private static JsonObject Waited(ClockResult clock) => Ok(new JsonObject
+    {
+        ["day"] = clock.Day,
+        ["virtual_date"] = clock.VirtualDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+        ["days_remaining"] = clock.DaysRemaining,
+        ["duration_reached"] = clock.DurationReached,
+        ["delivered_count"] = clock.DeliveredEventKeys.Count
+    });
 
     private static string AgentKey(JsonObject args) => "agent:" + (string)args["idempotency_key"]!;
     private static long Long(JsonObject args, string key) =>
