@@ -8,6 +8,8 @@ Rules this adapter keeps:
   every tool_result for that response. History is never edited (thinking blocks and caching depend on it).
 - No automatic model fallback: a refusal ends the run and is recorded (research integrity, ADR-0012).
 - Tools are not strict: malformed arguments are research observations, validated by the gateway.
+- Every paid request is reserved with the server first (ADR-0013 A1). The SDK does not retry by itself, and a
+  request whose billing is unknown is never retried: its reservation stays charged.
 - The API key is read by the SDK from the worker's environment and never passed anywhere else.
 """
 
@@ -30,13 +32,32 @@ UNAVAILABLE_TEXT = ("- These capabilities do not exist in this simulation and ca
 CONTINUATION = "The simulation is still running. Use the tools to act, wait, or finish."
 ERROR_STATUSES = {"malformed", "unsupported_capability"}
 
+REQUEST_TIMEOUT_SECONDS = 600.0
+COUNT_TIMEOUT_SECONDS = 30.0
+RETRY_DELAYS = (1.0, 4.0)
+# Responses that mean the request was turned away before the model ran. Anything else may have been billed.
+NOT_RUN_STATUSES = {400, 401, 402, 403, 404, 413, 422, 429, 529}
+RETRY_SAME_RESERVATION = {429, 529}
+# Token counts are estimates, so the reservation adds a margin.
+INPUT_MARGIN_TOKENS = 1_024
+INPUT_MARGIN_PERCENT = 5
+
 
 class PromptMismatch(Exception):
     """The prompt file on disk is not the one recorded in the run snapshot."""
 
 
 class ModelApiError(Exception):
-    """The model API failed after the SDK's retries. Only the error class name is kept."""
+    """The model API failed. Only the error class name is kept."""
+
+    usage: Optional[Dict[str, int]] = None  # what the turn is known to have used before it failed
+    not_run = False  # True when the failed request cannot have been billed
+
+
+class WallTimeReached(Exception):
+    """No wall time is left for another request."""
+
+    usage: Optional[Dict[str, int]] = None
 
 
 def find_prompts_dir() -> Path:
@@ -72,7 +93,8 @@ class ClaudeAgent(Agent):
     MAX_TOKENS_ATTEMPTS = 2  # one retry with unchanged history (ADR-0012)
 
     def __init__(self, snapshot: Dict[str, Any], tools: List[Dict[str, Any]], client: Any = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         agent = snapshot["agent"]
         self._model = agent["modelId"]
         self._effort = agent["settings"]["effort"]
@@ -86,11 +108,18 @@ class ClaudeAgent(Agent):
         self._pending: List[str] = []
         self._client = client if client is not None else self._default_client()
         self._clock = clock
+        self._sleep = sleep
+        self._deadline = clock() + int(snapshot["maxWallTimeSeconds"])
+        self._reserve: Optional[Callable[[int, int, int, int], int]] = None
+
+    def use_budget(self, reserve: Callable[[int, int, int, int], int]) -> None:
+        """reserve(turn, attempt, input_tokens, max_output_tokens) returns the granted output limit, or raises."""
+        self._reserve = reserve
 
     @staticmethod
     def _default_client() -> Any:
         import anthropic  # only needed for real runs
-        return anthropic.Anthropic(base_url=API_BASE_URL, max_retries=2, timeout=600.0)
+        return anthropic.Anthropic(base_url=API_BASE_URL, max_retries=0, timeout=REQUEST_TIMEOUT_SECONDS)
 
     def next_action(self, observation: Observation) -> Decision:
         if self._pending:
@@ -98,18 +127,33 @@ class ClaudeAgent(Agent):
         elif observation.turn > 1:
             self._messages.append({"role": "user", "content": CONTINUATION})
 
-        totals = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0, "latency": 0}
+        if self._reserve is None:
+            raise RuntimeError("no model request is sent without a budget")
+        totals = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0, "latency": 0, "settled": 0}
         response = None
-        for _ in range(self.MAX_TOKENS_ATTEMPTS):
-            started = self._clock()
-            response = self._create()
-            totals["latency"] += int((self._clock() - started) * 1000)
-            totals["input"] += _usage(response, "input_tokens")
-            totals["output"] += _usage(response, "output_tokens")
-            totals["cache_read"] += _usage(response, "cache_read_input_tokens")
-            totals["cache_creation"] += _usage(response, "cache_creation_input_tokens")
-            if response.stop_reason != "max_tokens":
-                break
+        try:
+            input_bound = self._input_bound()
+            for attempt in range(1, self.MAX_TOKENS_ATTEMPTS + 1):
+                self._remaining()  # do not reserve for a request there is no time to send
+                granted = self._reserve(observation.turn, attempt, input_bound, self._max_tokens)
+                started = self._clock()
+                response = self._create(granted)
+                totals["latency"] += int((self._clock() - started) * 1000)
+                totals["input"] += _usage(response, "input_tokens")
+                totals["output"] += _usage(response, "output_tokens")
+                totals["cache_read"] += _usage(response, "cache_read_input_tokens")
+                totals["cache_creation"] += _usage(response, "cache_creation_input_tokens")
+                totals["settled"] = attempt
+                if response.stop_reason != "max_tokens":
+                    break
+        except Exception as error:
+            # An answered attempt was paid for, whatever happened next. An unanswered one stays reserved,
+            # unless it is the only one and certainly did not run.
+            if totals["settled"]:
+                error.usage = dict(totals)
+            elif isinstance(error, ModelApiError) and error.not_run:
+                error.usage = dict(totals, settled=1)
+            raise
 
         common = dict(input_tokens=totals["input"], output_tokens=totals["output"], latency_ms=totals["latency"],
                       cache_read_tokens=totals["cache_read"], cache_creation_tokens=totals["cache_creation"],
@@ -141,17 +185,42 @@ class ClaudeAgent(Agent):
         self._messages.append({"role": "user", "content": content})
         self._pending = []
 
-    def _create(self) -> Any:
-        try:
-            return self._client.messages.create(
-                model=self._model,
-                max_tokens=self._max_tokens,
-                system=self._system,
-                tools=self._tools,
-                messages=self._messages,
-                thinking={"type": "adaptive"},
-                output_config={"effort": self._effort},
-                cache_control={"type": "ephemeral"},
-            )
-        except Exception as error:  # the SDK already retried 429, 5xx, and connection errors
-            raise ModelApiError(type(error).__name__) from None
+    def _request(self) -> Dict[str, Any]:
+        return dict(model=self._model, system=self._system, tools=self._tools, messages=self._messages,
+                    thinking={"type": "adaptive"}, output_config={"effort": self._effort},
+                    cache_control={"type": "ephemeral"})
+
+    def _remaining(self) -> float:
+        remaining = self._deadline - self._clock()
+        if remaining < 1:
+            raise WallTimeReached()
+        return remaining
+
+    def _input_bound(self) -> int:
+        """Counting is free, so any temporary failure may be retried."""
+        for delay in (*RETRY_DELAYS, None):
+            timeout = min(COUNT_TIMEOUT_SECONDS, self._remaining())
+            try:
+                counted = self._client.messages.count_tokens(**self._request(), timeout=timeout).input_tokens
+                return counted + max(INPUT_MARGIN_TOKENS, counted * INPUT_MARGIN_PERCENT // 100)
+            except Exception as error:
+                status = getattr(error, "status_code", None)
+                temporary = status is None or status in {408, 409, 429} or status >= 500
+                if delay is None or not temporary:
+                    raise ModelApiError(type(error).__name__) from None
+                self._sleep(delay)
+
+    def _create(self, max_tokens: int) -> Any:
+        """One reserved request. Only a request that did not run is sent again, under the same reservation."""
+        for delay in (*RETRY_DELAYS, None):
+            timeout = min(REQUEST_TIMEOUT_SECONDS, self._remaining())
+            try:
+                return self._client.messages.create(**self._request(), max_tokens=max_tokens, timeout=timeout)
+            except Exception as error:
+                status = getattr(error, "status_code", None)
+                if delay is not None and status in RETRY_SAME_RESERVATION:
+                    self._sleep(delay)
+                    continue
+                failure = ModelApiError(type(error).__name__)
+                failure.not_run = status in NOT_RUN_STATUSES
+                raise failure from None

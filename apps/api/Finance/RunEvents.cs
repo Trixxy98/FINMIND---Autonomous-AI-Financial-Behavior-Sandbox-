@@ -63,6 +63,8 @@ public static class FinanceEvents
         public const string AdvanceClock = "advance_clock";
         public const string ToolCall = "tool_call";
         public const string ClaimRun = "claim_run";
+        public const string ReserveModelCall = "reserve_model_call";
+        public const string ExpireSession = "expire_session";
     }
 
     public const string AgentSource = "agent";
@@ -93,6 +95,18 @@ public static class FinanceEvents
             ["cacheReadInputTokens"] = invocation.CacheReadInputTokens, ["cacheCreationInputTokens"] = invocation.CacheCreationInputTokens,
             ["toolUseCount"] = invocation.ToolUseCount, ["costMicroUsd"] = costMicroUsd
         }, AgentSource, Operations.ToolCall, TraceId: TurnTrace(invocation.Turn), EventVersion: 2);
+
+    // ADR-0013 A1.
+    public static PendingEvent ModelCostReserved(ModelReservation request, long maxOutputTokens, long reservedMicroUsd) =>
+        new("MODEL_COST_RESERVED", new JsonObject
+        {
+            ["turn"] = request.Turn, ["attempt"] = request.Attempt, ["inputTokens"] = request.InputTokens,
+            ["maxOutputTokens"] = maxOutputTokens, ["reservedMicroUsd"] = reservedMicroUsd
+        }, GatewaySource, Operations.ReserveModelCall, TraceId: TurnTrace(request.Turn));
+
+    public static PendingEvent RunReclaimed() =>
+        new("RUN_RECLAIMED", new JsonObject { ["reason"] = "Worker session expired before initialization." },
+            WorkerSource, Operations.ClaimRun);
 
     public static string TurnTrace(int turn) => $"turn-{turn:D4}";
 

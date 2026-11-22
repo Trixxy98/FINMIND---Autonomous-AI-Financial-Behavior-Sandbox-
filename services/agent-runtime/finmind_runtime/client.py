@@ -15,6 +15,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 RETRY_DELAYS = (0.5, 1.0, 2.0)
 TIMEOUT_SECONDS = 10.0
+# ADR-0013 A1: stay inside the gateway's limits, so a record is never lost to a rejected request.
+MAX_TOOL_CALL_BYTES = 16_384
+MAX_TOOL_NAME_CHARS = 100
+MAX_OUTPUT_TEXT_UNITS = 90_000  # UTF-16 code units, as the server counts
+MAX_TOOL_USE_COUNT = 100
 
 
 class SessionEnded(Exception):
@@ -75,14 +80,29 @@ class Client:
     def model_invocation(self, turn: int, input_tokens: int, output_tokens: int, latency_ms: int, output_text: str,
                          **extra: Any) -> Dict[str, Any]:
         """extra: cacheReadInputTokens, cacheCreationInputTokens, model, stopReason, refusalCategory, toolUseCount."""
+        encoded = output_text.encode("utf-16-le", "replace")
+        if len(encoded) > 2 * MAX_OUTPUT_TEXT_UNITS:
+            output_text = encoded[:2 * MAX_OUTPUT_TEXT_UNITS].decode("utf-16-le", "ignore")
         payload = {"turn": turn, "inputTokens": input_tokens, "outputTokens": output_tokens,
-                   "latencyMs": latency_ms, "outputText": output_text}
+                   "latencyMs": min(latency_ms, 3_600_000), "outputText": output_text}
+        if extra.get("toolUseCount") is not None:
+            extra["toolUseCount"] = min(extra["toolUseCount"], MAX_TOOL_USE_COUNT)
         payload.update({key: value for key, value in extra.items() if value is not None})
         return self._session("/internal/worker/session/model-invocations", payload)
 
     def tool_call(self, tool_call_id: str, tool: str, arguments: Any) -> Dict[str, Any]:
-        return self._session("/internal/worker/session/tool-calls",
-                             {"toolCallId": tool_call_id, "tool": tool, "arguments": arguments})
+        payload = {"toolCallId": tool_call_id, "tool": tool[:MAX_TOOL_NAME_CHARS] or "(empty)", "arguments": arguments}
+        size = len(json.dumps(payload).encode("utf-8"))
+        if size > MAX_TOOL_CALL_BYTES:
+            # No tool accepts this field, so the gateway records the attempt as malformed and the agent is told.
+            payload["arguments"] = {"_oversized_arguments_bytes": size}
+        return self._session("/internal/worker/session/tool-calls", payload)
+
+    def reserve_model_call(self, turn: int, attempt: int, input_tokens: int, max_output_tokens: int) -> Dict[str, Any]:
+        """ADR-0013 A1: must succeed before a paid request is sent. A retry returns the same reservation."""
+        return self._session("/internal/worker/session/model-reservations",
+                             {"turn": turn, "attempt": attempt, "inputTokens": input_tokens,
+                              "maxOutputTokens": max_output_tokens})
 
     def finish(self, outcome: str, reason: str) -> Dict[str, Any]:
         return self._session("/internal/worker/session/finish", {"outcome": outcome, "reason": reason})
@@ -108,9 +128,12 @@ class Client:
             if status >= 500:
                 last_error = ApiError(status, None)
                 continue
-            body = json.loads(raw) if raw else None
             if status == 401:
                 raise SessionEnded()
+            try:
+                body = json.loads(raw) if raw else None
+            except ValueError:
+                raise ApiError(status, None) from None
             if status >= 400:
                 raise ApiError(status, body)
             return status, body

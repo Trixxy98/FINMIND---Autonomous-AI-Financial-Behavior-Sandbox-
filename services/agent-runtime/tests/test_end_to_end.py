@@ -12,6 +12,7 @@ import urllib.request
 import _path  # noqa: F401
 from types import SimpleNamespace
 
+from finmind_runtime.agents import create_agent
 from finmind_runtime.claude import ClaudeAgent
 from finmind_runtime.client import Client, urllib_transport
 from finmind_runtime.worker import Worker
@@ -20,6 +21,20 @@ API = os.environ.get("FINMIND_E2E_API_URL")
 TOKEN = os.environ.get("FINMIND_WORKER_TOKEN", "")
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "BUDGET_EXCEEDED"}
 IDS = re.compile(r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{64})$")
+
+
+def mock_only(snapshot, tools):
+    # The shared test queue may hold Claude runs: a test must never be able to make a paid call for them.
+    if snapshot["agent"]["provider"] != "mock":
+        raise ValueError("tests run only mock agents")
+    return create_agent(snapshot, tools)
+
+
+def test_worker(client=None, **kwargs):
+    return Worker(client or Client(API, TOKEN), agent_factory=mock_only, **kwargs)
+
+
+test_worker.__test__ = False
 
 
 def http(method, path, payload=None):
@@ -48,7 +63,7 @@ def events(run_id):
 
 
 def run_until_terminal(run_id, worker=None):
-    worker = worker or Worker(Client(API, TOKEN))
+    worker = worker or test_worker()
     result = None
     for _ in range(50):  # other queued runs in the shared test database may be claimed first
         claimed = worker.run_once()
@@ -135,7 +150,7 @@ class EndToEndTests(unittest.TestCase):
             if claimed_run == run_id and turn == 6:
                 http("POST", f"/internal/runs/{run_id}/cancel", {"reason": "researcher stopped the run"})
 
-        result = run_until_terminal(run_id, Worker(Client(API, TOKEN), on_turn=cancel_at_turn_six))
+        result = run_until_terminal(run_id, test_worker(on_turn=cancel_at_turn_six))
         self.assertEqual(result.outcome, "stopped")
         evs = events(run_id)
         cancelled = next(e["sequence"] for e in evs
@@ -165,9 +180,11 @@ class EndToEndTests(unittest.TestCase):
                    tool_use("b", "get_environment", {})], "tool_use"),
             reply([tool_use("c", "finish", {"summary": "Balance checked."})], "tool_use"),
         ]
-        fake_client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kwargs: scripted.pop(0)))
+        fake_client = SimpleNamespace(messages=SimpleNamespace(
+            create=lambda **kwargs: scripted.pop(0),
+            count_tokens=lambda **kwargs: SimpleNamespace(input_tokens=13_000)))
         # Drain runs left queued by other tests so the scripted client only serves this run.
-        while Worker(Client(API, TOKEN)).run_once() is not None:
+        while test_worker().run_once() is not None:
             pass
         config_body = config(scenario="S01")
         config_body.update({"maxModelTokens": 100_000, "maxCostMicroUsd": 1_000_000,
@@ -200,7 +217,7 @@ class EndToEndTests(unittest.TestCase):
             return status, raw
 
         run_id = create_and_start(scenario="S01")
-        run_until_terminal(run_id, Worker(Client(API, TOKEN, transport=flaky)))
+        run_until_terminal(run_id, test_worker(Client(API, TOKEN, transport=flaky)))
         self.assertEqual(len(dropped), 1)
         chain = [e["eventType"] for e in events(run_id) if e["traceId"] == dropped[0]]
         self.assertEqual(chain.count("TOOL_CALL_PROPOSED"), 1)

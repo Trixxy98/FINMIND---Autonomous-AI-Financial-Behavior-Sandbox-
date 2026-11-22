@@ -13,8 +13,10 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
     // Sessions: 32 random bytes, returned once; only the SHA-256 hash is stored.
     public (string Token, RunInfo Run)? Claim()
     {
+        ReapExpiredSessions();
         var token = Base64UrlToken();
-        var run = ledger.ClaimQueuedRun(HashToken(token), time.GetUtcNow() + AgentGatewayRules.SessionLifetime);
+        var now = time.GetUtcNow();
+        var run = ledger.ClaimQueuedRun(HashToken(token), now, now + AgentGatewayRules.SessionLifetime);
         return run is null ? null : (token, run);
     }
 
@@ -23,6 +25,47 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
         if (string.IsNullOrEmpty(token) || token.Length > 200) return null;
         var now = time.GetUtcNow();
         return ledger.ResolveSession(HashToken(token), now, now + AgentGatewayRules.SessionLifetime);
+    }
+
+    // ADR-0013 A1: RUNNING runs whose worker is gone become FAILED.
+    public int ReapExpiredSessions() => ledger.FailRunsWithExpiredSessions(time.GetUtcNow());
+
+    // Usage of a paid call must be recordable after the run stopped and its session was revoked.
+    // The ledger records such a report only for a turn that holds a reservation. Never use this for other routes.
+    public Guid? ResolveSessionForUsage(string? token)
+    {
+        if (string.IsNullOrEmpty(token) || token.Length > 200) return null;
+        return ResolveSession(token) ?? ledger.FindSession(HashToken(token));
+    }
+
+    private static readonly ToolDefinition ModelReservationSchema = new("model_reservation", "Permission for one model request.",
+    [
+        new("turn", "integer", true, "Turn number.", 1, 100_000),
+        new("attempt", "integer", true, "Attempt within the turn.", 1, 2),
+        new("inputTokens", "integer", true, "Counted input tokens plus a margin.", 1, 10_000_000),
+        new("maxOutputTokens", "integer", true, "Requested output limit.", 1, 16_000)
+    ]);
+
+    public JsonObject ReserveModelCall(Guid runId, JsonNode? body)
+    {
+        var invalid = ModelReservationSchema.Validate(body);
+        if (invalid.Count > 0)
+        {
+            var rejected = Rejected(LedgerReasonCode.InvalidToolArguments);
+            rejected["data"] = new JsonObject { ["fields"] = new JsonArray(invalid.Select(f => (JsonNode)f).ToArray()) };
+            return rejected;
+        }
+
+        var args = (JsonObject)body!;
+        var result = ledger.ReserveModelCall(runId, new ModelReservation(
+            Int(args, "turn")!.Value, Int(args, "attempt")!.Value, Long(args, "inputTokens"), Long(args, "maxOutputTokens")));
+        var response = result.Denial is { } denial ? Rejected(denial) : Ok(new JsonObject());
+        response["data"] = new JsonObject
+        {
+            ["max_output_tokens"] = result.MaxOutputTokens, ["reserved_micro_usd"] = result.ReservedMicroUsd,
+            ["committed_micro_usd"] = result.CommittedMicroUsd
+        };
+        return response;
     }
 
     public static byte[] HashToken(string token) => SHA256.HashData(Encoding.UTF8.GetBytes(token));
@@ -47,7 +90,8 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
         new("model", "string", false, "Model ID that answered.", MaxLength: 100, Format: "key"),
         new("stopReason", "string", false, "Stop reason.", MaxLength: 40, Format: "key"),
         new("refusalCategory", "string", false, "Refusal category.", MaxLength: 60, Format: "key"),
-        new("toolUseCount", "integer", false, "Tool calls in the response.", 0, 100)
+        new("toolUseCount", "integer", false, "Tool calls in the response.", 0, 100),
+        new("settledAttempts", "integer", false, "Reserved attempts covered by this usage.", 1, 2)
     ]);
 
     // ADR-0011: records one agent turn and enforces the token and wall-time budgets.
@@ -66,7 +110,8 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
             Int(args, "turn")!.Value, Long(args, "inputTokens"), Long(args, "outputTokens"), Long(args, "latencyMs"),
             ToolArgumentRedaction.RedactText((string?)args["outputText"] ?? ""),
             Int(args, "cacheReadInputTokens") ?? 0, Int(args, "cacheCreationInputTokens") ?? 0,
-            (string?)args["model"], (string?)args["stopReason"], (string?)args["refusalCategory"], Int(args, "toolUseCount") ?? 0));
+            (string?)args["model"], (string?)args["stopReason"], (string?)args["refusalCategory"], Int(args, "toolUseCount") ?? 0,
+            Int(args, "settledAttempts")));
         var response = result.Denial is { } denial ? Rejected(denial) : Ok(new JsonObject());
         response["data"] = new JsonObject
         {

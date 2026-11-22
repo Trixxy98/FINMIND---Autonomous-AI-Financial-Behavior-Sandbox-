@@ -246,8 +246,14 @@ if (workerToken is { Length: >= 32 })
         return Execute(() => Results.Json(gateway.Execute(runId, toolCallId, tool, body["arguments"]?.DeepClone())));
     });
 
+    worker.MapPost("/session/model-reservations", (HttpRequest request, JsonObject? body, ToolGateway gateway) =>
+        WithSession(request, gateway, runId => Execute(() => Results.Json(gateway.ReserveModelCall(runId, body)))));
+
+    // The only route that accepts a revoked or expired session: it can only report usage (ADR-0013 A1).
     worker.MapPost("/session/model-invocations", (HttpRequest request, JsonObject? body, ToolGateway gateway) =>
-        WithSession(request, gateway, runId => Execute(() => Results.Json(gateway.RecordModelInvocation(runId, body)))));
+        gateway.ResolveSessionForUsage(Bearer(request)) is { } runId
+            ? Execute(() => Results.Json(gateway.RecordModelInvocation(runId, body)))
+            : Results.StatusCode(401));
 
     worker.MapPost("/session/finish", (HttpRequest request, FinishRunRequest finish, ToolGateway gateway, PostgresLedger ledger) =>
         WithSession(request, gateway, runId => Execute(() =>
@@ -267,6 +273,29 @@ else
 {
     app.Logger.LogWarning("FINMIND_WORKER_TOKEN is missing or shorter than 32 characters; worker routes are disabled.");
 }
+
+// ADR-0013 A1: a run whose worker died does not stay RUNNING, even if no worker polls again.
+var reaper = app.Services.GetRequiredService<ToolGateway>();
+app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
+{
+    using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+    try
+    {
+        while (await timer.WaitForNextTickAsync(app.Lifetime.ApplicationStopping))
+        {
+            try
+            {
+                var failed = reaper.ReapExpiredSessions();
+                if (failed > 0) app.Logger.LogWarning("Failed {Count} runs with expired worker sessions.", failed);
+            }
+            catch (Exception ex)
+            {
+                app.Logger.LogError(ex, "Checking for expired worker sessions failed.");
+            }
+        }
+    }
+    catch (OperationCanceledException) { }
+}));
 
 app.Run("http://127.0.0.1:5080");
 

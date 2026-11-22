@@ -64,6 +64,9 @@ finish (session)                   → COMPLETED | FAILED | BUDGET_EXCEEDED
 - After the retries fail, the worker finishes the run as `failed` with the
   reason `runtime: API unreachable`.
 - HTTP 401 during a session means the session ended; the worker stops.
+- Amended by ADR-0013 A1: the session is renewed during a model call; an
+  error inside one run fails that run and not the worker; tool calls over
+  the size limit are sent as recorded malformed attempts.
 
 ### Cancellation bound
 

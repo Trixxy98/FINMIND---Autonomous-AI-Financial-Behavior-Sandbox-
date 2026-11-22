@@ -59,6 +59,10 @@ option A). The worker has no database credentials.
 - Lifetime 10 minutes, extended by each successful call and by
   `POST /internal/worker/session/heartbeat`.
 - Revoked when the run reaches a terminal state. One active session per run.
+- Amended by ADR-0013 A1: an expired session on an `INITIALIZING` run lets
+  the run be claimed again; on a `RUNNING` run it fails the run. A revoked
+  or expired token is accepted by one route only, the usage report, and the
+  ledger records that only for a turn holding a cost reservation.
 - Sent as `Authorization: Bearer <token>`. Invalid, expired, or revoked
   tokens return HTTP 401 without detail. A valid token for a run that is
   not in the required state returns the decided result `RUN_NOT_ACTIVE`.
@@ -70,9 +74,10 @@ All paths are under `/internal/worker`, bound to `127.0.0.1`.
 | Method | Path | Credential | Effect |
 |---|---|---|---|
 | POST | `/runs/claim` | Worker | Oldest `QUEUED` run → `INITIALIZING`; returns run ID, session token, snapshot, tool schemas. 204 if none queued |
-| POST | `/session/initialize` | Session | Server funds the run from its snapshot, prepares scenario state (ADR-0010) → `RUNNING` |
+| POST | `/session/initialize` | Session | Server funds the run from its snapshot, prepares scenario state (ADR-0010) → `RUNNING`; a retry returns the original activation (ADR-0013) |
 | POST | `/session/heartbeat` | Session | Extends the session; returns run status (so the worker sees cancellation) |
 | POST | `/session/tool-calls` | Session | Evaluates one tool call (below) |
+| POST | `/session/model-reservations` | Session | Reserves the worst case of one model request before it is sent (ADR-0013) |
 | POST | `/session/finish` | Session | Body `{ "outcome": "completed" \| "failed" \| "budget_exceeded", "reason": "..." }` → terminal state |
 
 Run lifecycle transitions follow ADR-0008. The worker cannot choose

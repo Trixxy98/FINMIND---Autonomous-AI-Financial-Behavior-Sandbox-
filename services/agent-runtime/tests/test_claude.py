@@ -20,7 +20,7 @@ TOOLS = [
 
 def snapshot(describe=False, effort="medium"):
     prompt_hash = hashlib.sha256((find_prompts_dir() / PROMPT_FILE).read_bytes()).hexdigest()
-    return {"objective": "Manage funds.", "promptHash": prompt_hash, "describeUnavailableCapabilities": describe,
+    return {"objective": "Manage funds.", "maxWallTimeSeconds": 900, "promptHash": prompt_hash, "describeUnavailableCapabilities": describe,
             "agent": {"provider": "anthropic", "modelId": "claude-opus-5-5",
                       "settings": {"effort": effort, "maxOutputTokensPerTurn": 16000}}}
 
@@ -42,6 +42,9 @@ class FakeMessages:
         self.responses = list(responses)
         self.requests = []
 
+    def count_tokens(self, **kwargs):
+        return SimpleNamespace(input_tokens=100)
+
     def create(self, **kwargs):
         self.requests.append(copy.deepcopy(kwargs))
         outcome = self.responses.pop(0)
@@ -53,6 +56,7 @@ class FakeMessages:
 def agent_with(responses, **kwargs):
     messages = FakeMessages(responses)
     agent = ClaudeAgent(snapshot(**kwargs), TOOLS, client=SimpleNamespace(messages=messages), clock=lambda: 0.0)
+    agent.use_budget(lambda turn, attempt, input_tokens, max_output: max_output)
     return agent, messages
 
 
@@ -162,6 +166,10 @@ class SdkCompatibilityTests(unittest.TestCase):
         import inspect
         client = anthropic.Anthropic(api_key="not-a-real-key", base_url="https://api.anthropic.com")
         parameters = inspect.signature(client.messages.create).parameters
+        counting = inspect.signature(client.messages.count_tokens).parameters
+        for name in ("model", "system", "tools", "messages", "thinking", "output_config", "cache_control", "timeout"):
+            self.assertIn(name, counting)
+        self.assertIn("timeout", parameters)
         for name in ("model", "max_tokens", "system", "tools", "messages", "thinking", "output_config", "cache_control"):
             self.assertIn(name, parameters)
 

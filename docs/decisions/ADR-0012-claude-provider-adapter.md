@@ -145,6 +145,12 @@ observable record.
   for input, output, cache reads, and cache writes, with the date they were
   checked and the source URL. Loaded and validated at API startup, like
   scenarios. Integer micro-dollars throughout; no floating point.
+- Before each request the worker reserves its worst case (ADR-0013 A1):
+  counted input tokens plus a margin at the dearest input rate, and all of
+  `max_tokens` as output. The server lowers `max_tokens` to what fits or ends
+  the run without a request. A request with unknown billing keeps its
+  reservation. The budget follows our price table and a token-count
+  estimate; it is not a provider billing limit.
 - The worker reports token counts; the server computes cost, adds it to
   `experiment_runs.model_cost_micro_usd`, and ends the run as
   `BUDGET_EXCEEDED` with `COST_BUDGET_EXCEEDED` when the total passes
@@ -186,8 +192,10 @@ Phase 4. Until then the configuration validator rejects it for `anthropic`.
   environment variable cannot redirect requests elsewhere.
 - Network-level egress restriction (only the API and the Anthropic endpoint)
   is a deployment control, documented now and enforced in Phase 5.
-- SDK errors: the SDK's own retries handle 429, 5xx, and connection errors.
-  After those, the invocation is recorded as failed and the run ends as
+- SDK errors (amended by ADR-0013 A1): SDK retries are off. The adapter
+  retries only 429 and 529, under the same reservation. Timeouts, connection
+  errors, and other 5xx may have been billed, so they are not retried.
+  Known usage is recorded and the run ends as
   `failed` with the HTTP class (never the error body, which may echo request
   content).
 
@@ -240,7 +248,7 @@ Phase 4. Until then the configuration validator rejects it for `anthropic`.
 - Test isolation: test classes that create queued runs now share one xUnit
   collection, so one test cannot claim another test's run.
 - Manual smoke run: `services/agent-runtime/scripts/smoke_claude.py`
-  (S01, 3 virtual days, cap US$0.50). It runs only when started on purpose.
+  (S01, 3 virtual days, US$0.50 budget as defined above). It runs only when started on purpose.
 - Tests: `ProviderTests` (C#, both ledgers), `tests/test_claude.py`, worker
   tests for multi-call turns, idle turns, refusals, and rejected records,
   and an end-to-end test that drives the real API and worker with a

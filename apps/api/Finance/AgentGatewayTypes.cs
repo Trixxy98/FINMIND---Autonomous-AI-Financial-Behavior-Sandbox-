@@ -17,11 +17,17 @@ public sealed record ModelInvocationResult(LedgerReasonCode? Denial, bool Replay
 public sealed record ModelInvocation(
     int Turn, long InputTokens, long OutputTokens, long LatencyMs, string OutputText,
     long CacheReadInputTokens = 0, long CacheCreationInputTokens = 0, string? Model = null,
-    string? StopReason = null, string? RefusalCategory = null, int ToolUseCount = 0)
+    string? StopReason = null, string? RefusalCategory = null, int ToolUseCount = 0,
+    // ADR-0013 A1: how many attempts this report settles, from the first. Null means all. Others stay reserved.
+    int? SettledAttempts = null)
 {
     // The token budget counts new tokens; cache reads are excluded (their cost is still metered).
     public long BudgetTokens => checked(InputTokens + OutputTokens + CacheCreationInputTokens);
 }
+
+// ADR-0013 A1: permission for one model request, granted before it is sent.
+public sealed record ModelReservation(int Turn, int Attempt, long InputTokens, long MaxOutputTokens);
+public sealed record ModelReservationResult(LedgerReasonCode? Denial, long MaxOutputTokens, long ReservedMicroUsd, long CommittedMicroUsd);
 
 public sealed record AgentMerchant(Guid AccountId, string Key, string Label);
 
@@ -41,9 +47,30 @@ public static class AgentGatewayRules
     public static string Provider(JsonObject snapshot) => snapshot["agent"]!["provider"]!.GetValue<string>();
     public static string ModelId(JsonObject snapshot) => snapshot["agent"]!["modelId"]!.GetValue<string>();
 
-    public static long CostOf(JsonObject snapshot, ModelInvocation invocation) =>
+    public static long CostOf(JsonObject snapshot, ModelInvocation invocation, int requests) =>
         PricingCatalog.CostMicroUsd(Provider(snapshot), ModelId(snapshot), invocation.InputTokens, invocation.OutputTokens,
-            invocation.CacheReadInputTokens, invocation.CacheCreationInputTokens);
+            invocation.CacheReadInputTokens, invocation.CacheCreationInputTokens, requests);
+
+    public const string SessionExpiredReason = "Worker session expired.";
+    private const long MinimumOutputTokens = 1_024;
+
+    // committed = recorded cost + outstanding reservations. Null when not even a minimal answer fits under the cap.
+    public static (long MaxOutputTokens, long CostMicroUsd)? Grant(JsonObject snapshot, long committed, ModelReservation request)
+    {
+        if (Provider(snapshot) != "anthropic") return (request.MaxOutputTokens, 0);
+        var model = ModelId(snapshot);
+        var requested = Math.Min(request.MaxOutputTokens, Number(snapshot["agent"]!["settings"]!.AsObject(), "maxOutputTokensPerTurn"));
+        var granted = Math.Min(requested,
+            PricingCatalog.AffordableOutputTokens(model, request.InputTokens, MaxCostMicroUsd(snapshot) - committed));
+        if (granted < Math.Min(MinimumOutputTokens, requested)) return null;
+        return (granted, PricingCatalog.WorstCaseMicroUsd(model, request.InputTokens, granted));
+    }
+
+    public static JsonObject[] Settled(IEnumerable<JsonObject> reservations, ModelInvocation invocation) =>
+        reservations.Where(p => invocation.SettledAttempts is not { } count || Number(p, "attempt") <= count).ToArray();
+
+    public static long Number(JsonObject source, string key) => ToolDefinition.TryGetInteger(source[key], out var number)
+        ? number : throw new InvalidOperationException($"{key} is not an integer.");
 
     public static int MaxActions(JsonObject snapshot) => (int)snapshot["maxActions"]!.GetValue<long>();
 

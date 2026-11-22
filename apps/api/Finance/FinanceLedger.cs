@@ -46,7 +46,11 @@ public interface IFinanceLedger
     EnvironmentView GetEnvironment(Guid runId);
 
     // ADR-0009 gateway support. Token hashes are SHA-256 of the session token; tokens are never stored.
-    RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset expiresAt);
+    RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset now, DateTimeOffset expiresAt);
+    int FailRunsWithExpiredSessions(DateTimeOffset now);
+    // Any session ever issued, revoked or not. Only for reporting usage of a call that was already paid for.
+    Guid? FindSession(byte[] tokenHash);
+    ModelReservationResult ReserveModelCall(Guid runId, ModelReservation reservation);
     Guid? ResolveSession(byte[] tokenHash, DateTimeOffset now, DateTimeOffset newExpiresAt);
     ToolCallBegin BeginToolCall(Guid runId, string toolCallId, string tool, JsonObject redactedArguments, string requestHash);
     void CompleteToolCall(Guid runId, string toolCallId, string tool, ToolCallCompletion completion);
@@ -218,6 +222,7 @@ public sealed class InMemoryLedger : IFinanceLedger
         public readonly List<ScheduledEvent> Schedule = [];
         public long TokensUsed;
         public long CostMicroUsd;
+        public long ReservedMicroUsd;
     }
 
     private sealed class ScheduledEvent(MaterializedScenarioEvent evt)
@@ -758,6 +763,12 @@ public sealed class InMemoryLedger : IFinanceLedger
         {
             if (runId == Guid.Empty) throw new LedgerValidationException(LedgerReasonCode.MissingRequiredField, "Run ID is required.");
             var from = RequireRun(runId);
+            if (from == RunStatus.Running)
+            {
+                // ADR-0013 A1: a retried initialize returns the original activation.
+                var funded = _journals.Single(j => j.RunId == runId && j.Kind == JournalKind.OpeningFunding);
+                return new OpenRunResult(funded.JournalId, true, true, funded.Postings.Single(p => p.AmountSen > 0).AccountId);
+            }
             RunLifecycle.EnsureTransition(from, RunStatus.Running);
             var run = _managedRuns[runId];
             var snapshot = run.Snapshot;
@@ -851,19 +862,79 @@ public sealed class InMemoryLedger : IFinanceLedger
         return due.Select(s => s.Event.Key).ToArray();
     }
 
-    public RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset expiresAt)
+    public RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset now, DateTimeOffset expiresAt)
     {
         lock (_gate)
         {
-            var next = _managedRuns.Where(r => r.Value.Status == RunStatus.Queued)
+            Guid? Oldest(Func<KeyValuePair<Guid, ManagedRun>, bool> match) => _managedRuns.Where(match)
                 .OrderBy(r => r.Value.QueuedAt).ThenBy(r => r.Key).Select(r => (Guid?)r.Key).FirstOrDefault();
+
+            var queued = Oldest(r => r.Value.Status == RunStatus.Queued);
+            var next = queued ?? Oldest(r => r.Value.Status == RunStatus.Initializing && HasExpiredSession(r.Key, now));
             if (next is not { } runId) return null;
-            SetStatus(runId, RunStatus.Initializing, null);
+            if (queued is not null) SetStatus(runId, RunStatus.Initializing, null);
             RevokeSessions(runId);
             _sessions[Convert.ToHexString(tokenHash)] = (runId, expiresAt, false);
-            StoreEvent(runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ClaimRun, RunStatus.Queued,
-                RunStatus.Initializing, null, FinanceEvents.WorkerSource));
+            StoreEvent(runId, queued is null
+                ? FinanceEvents.RunReclaimed()
+                : FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ClaimRun, RunStatus.Queued,
+                    RunStatus.Initializing, null, FinanceEvents.WorkerSource));
             return GetRun(runId);
+        }
+    }
+
+    private bool HasExpiredSession(Guid runId, DateTimeOffset now) =>
+        _sessions.Values.Any(s => s.RunId == runId && !s.Revoked && s.ExpiresAt <= now);
+
+    public int FailRunsWithExpiredSessions(DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            var lost = _managedRuns.Where(r => r.Value.Status == RunStatus.Running && HasExpiredSession(r.Key, now))
+                .Select(r => r.Key).ToArray();
+            foreach (var runId in lost)
+            {
+                SetStatus(runId, RunStatus.Failed, AgentGatewayRules.SessionExpiredReason);
+                RevokeSessions(runId);
+                StoreEvent(runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ExpireSession, RunStatus.Running,
+                    RunStatus.Failed, AgentGatewayRules.SessionExpiredReason, FinanceEvents.GatewaySource));
+            }
+            return lost.Length;
+        }
+    }
+
+    public Guid? FindSession(byte[] tokenHash)
+    {
+        lock (_gate) return _sessions.TryGetValue(Convert.ToHexString(tokenHash), out var session) ? session.RunId : null;
+    }
+
+    private JsonObject[] Reservations(Guid runId, string trace) => _events.TryGetValue(runId, out var events)
+        ? events.Where(e => e.EventType == "MODEL_COST_RESERVED" && e.TraceId == trace).Select(e => e.Payload).ToArray()
+        : [];
+
+    // ADR-0013 A1: reserves the worst case of one request before it is sent.
+    public ModelReservationResult ReserveModelCall(Guid runId, ModelReservation reservation)
+    {
+        lock (_gate)
+        {
+            var status = RequireRun(runId);
+            var run = _managedRuns[runId];
+            var trace = FinanceEvents.TurnTrace(reservation.Turn);
+            var committed = run.CostMicroUsd + run.ReservedMicroUsd;
+            if (status != RunStatus.Running) return new(LedgerReasonCode.RunNotActive, 0, 0, committed);
+            if (WallTimeExceeded(runId))
+                return new(Exhaust(runId, LedgerReasonCode.WallTimeBudgetExceeded, AgentGatewayRules.WallTimeExhaustedReason, trace),
+                    0, 0, committed);
+
+            var same = Reservations(runId, trace).FirstOrDefault(p => AgentGatewayRules.Number(p, "attempt") == reservation.Attempt);
+            if (same is not null)
+                return new(null, AgentGatewayRules.Number(same, "maxOutputTokens"), AgentGatewayRules.Number(same, "reservedMicroUsd"), committed);
+
+            if (AgentGatewayRules.Grant(run.Snapshot, committed, reservation) is not { } grant)
+                return new(Exhaust(runId, LedgerReasonCode.CostBudgetExceeded, AgentGatewayRules.CostExhaustedReason, trace), 0, 0, committed);
+            run.ReservedMicroUsd += grant.CostMicroUsd;
+            StoreEvent(runId, FinanceEvents.ModelCostReserved(reservation, grant.MaxOutputTokens, grant.CostMicroUsd));
+            return new(null, grant.MaxOutputTokens, grant.CostMicroUsd, committed + grant.CostMicroUsd);
         }
     }
 
@@ -938,15 +1009,21 @@ public sealed class InMemoryLedger : IFinanceLedger
             if (_events.TryGetValue(runId, out var events)
                 && events.Any(e => e.EventType == "MODEL_INVOCATION_COMPLETED" && e.TraceId == trace))
                 return new ModelInvocationResult(null, true, run.TokensUsed, run.CostMicroUsd);
-            if (status != RunStatus.Running)
+            var reservations = Reservations(runId, trace);
+            // A stopped run still records a call that was reserved, because it was paid for.
+            if (status != RunStatus.Running && reservations.Length == 0)
                 return new ModelInvocationResult(LedgerReasonCode.RunNotActive, false, run.TokensUsed, run.CostMicroUsd);
 
-            var cost = AgentGatewayRules.CostOf(run.Snapshot, invocation);
+            var settled = AgentGatewayRules.Settled(reservations, invocation);
+            var cost = AgentGatewayRules.CostOf(run.Snapshot, invocation, settled.Length);
+            run.ReservedMicroUsd -= settled.Sum(p => AgentGatewayRules.Number(p, "reservedMicroUsd"));
             StoreEvent(runId, FinanceEvents.ModelInvocationCompleted(invocation, cost));
             run.TokensUsed = checked(run.TokensUsed + invocation.BudgetTokens);
             run.CostMicroUsd = checked(run.CostMicroUsd + cost);
             LedgerReasonCode? denial = null;
-            if (WallTimeExceeded(runId))
+            if (status != RunStatus.Running)
+                denial = LedgerReasonCode.RunNotActive;
+            else if (WallTimeExceeded(runId))
                 denial = Exhaust(runId, LedgerReasonCode.WallTimeBudgetExceeded, AgentGatewayRules.WallTimeExhaustedReason, trace);
             else if (run.TokensUsed > AgentGatewayRules.MaxModelTokens(run.Snapshot))
                 denial = Exhaust(runId, LedgerReasonCode.TokenBudgetExceeded, AgentGatewayRules.TokenExhaustedReason, trace);

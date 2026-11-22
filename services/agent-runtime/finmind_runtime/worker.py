@@ -7,15 +7,17 @@ Environment: FINMIND_API_URL (default http://127.0.0.1:5080), FINMIND_WORKER_TOK
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from .agents import Agent, Observation, create_agent
-from .claude import ModelApiError, PromptMismatch
+from .claude import ModelApiError, PromptMismatch, WallTimeReached
 from .client import ApiError, Client, SessionEnded, Unreachable
 
 log = logging.getLogger("finmind_runtime")
@@ -23,7 +25,15 @@ log = logging.getLogger("finmind_runtime")
 # Server responses that mean the run has ended; the server already moved it and revoked the session.
 TERMINAL_REASONS = {"RUN_NOT_ACTIVE", "ACTION_BUDGET_EXCEEDED", "WALL_TIME_BUDGET_EXCEEDED", "TOKEN_BUDGET_EXCEEDED",
                     "COST_BUDGET_EXCEEDED"}
+SESSION_RENEW_SECONDS = 60.0  # sessions last 10 minutes; a model call can last as long (ADR-0013 A1)
+RENEW_GRACE_SECONDS = 60.0    # past the deadline a hung worker stops renewing and the server fails the run
 MAX_IDLE_TURNS = 3  # consecutive turns without tool calls before the run ends (ADR-0012)
+
+
+class ReservationDenied(Exception):
+    def __init__(self, reason_code: Optional[str]) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
 
 
 @dataclass
@@ -64,14 +74,19 @@ class Worker:
         try:
             self._client.initialize()
             agent = self._agent_factory(snapshot, claim.get("tools", []))
+            use_budget = getattr(agent, "use_budget", None)
+            if use_budget:
+                use_budget(self._reserve)
         except ApiError as error:
             return self._finish(run_id, "failed", f"runtime: initialization rejected ({error.reason_code})", 0)
         except PromptMismatch:
             return self._finish(run_id, "failed", "runtime: prompt file does not match the run snapshot", 0)
-        except (ValueError, ImportError) as error:
-            return self._finish(run_id, "failed", f"runtime: {type(error).__name__}", 0)
         except SessionEnded:
             return RunResult(run_id, "stopped", 0, "session ended")
+        except Unreachable:
+            return self._finish(run_id, "failed", "runtime: API unreachable", 0)
+        except Exception as error:  # the class name only: messages may hold secrets or request content
+            return self._finish(run_id, "failed", f"runtime: {type(error).__name__}", 0)
 
         deadline = self._clock() + int(snapshot["maxWallTimeSeconds"])
         # The server enforces maxActions (ADR-0009); this is only a safety net one turn beyond it.
@@ -95,10 +110,20 @@ class Worker:
                 if self._on_turn:
                     self._on_turn(run_id, turn)
                 try:
-                    decision = agent.next_action(Observation(snapshot["objective"], claim.get("tools", []), turn,
-                                                             last_tool, last_response, last_results))
-                except ModelApiError as error:
-                    return self._finish(run_id, "failed", f"runtime: model API error ({error})", turn)
+                    with self._renewed_session(deadline + RENEW_GRACE_SECONDS):
+                        decision = agent.next_action(Observation(snapshot["objective"], claim.get("tools", []), turn,
+                                                                 last_tool, last_response, last_results))
+                except Exception as error:
+                    self._report_usage(turn, getattr(error, "usage", None))
+                    if isinstance(error, ModelApiError):
+                        return self._finish(run_id, "failed", f"runtime: model API error ({error})", turn)
+                    if isinstance(error, WallTimeReached):
+                        return self._finish(run_id, "budget_exceeded", "runtime: wall-time budget reached", turn)
+                    if isinstance(error, ReservationDenied):
+                        if error.reason_code in TERMINAL_REASONS:
+                            return RunResult(run_id, "stopped", turn, error.reason_code)
+                        return self._finish(run_id, "failed", f"runtime: reservation rejected ({error.reason_code})", turn)
+                    raise
                 calls = decision.tool_calls
                 invocation = self._client.model_invocation(
                     turn, decision.input_tokens, decision.output_tokens, decision.latency_ms, decision.output_text,
@@ -139,11 +164,54 @@ class Worker:
             return RunResult(run_id, "stopped", turn, "session ended")
         except Unreachable:
             return self._finish(run_id, "failed", "runtime: API unreachable", turn)
+        except ApiError as error:
+            return self._finish(run_id, "failed", f"runtime: request rejected (HTTP {error.status})", turn)
+        except Exception as error:
+            return self._finish(run_id, "failed", f"runtime: {type(error).__name__}", turn)
+
+    def _reserve(self, turn: int, attempt: int, input_tokens: int, max_output_tokens: int) -> int:
+        response = self._client.reserve_model_call(turn, attempt, input_tokens, max_output_tokens)
+        if response.get("status") != "ok":
+            raise ReservationDenied(response.get("reason_code"))
+        return int(response["data"]["max_output_tokens"])
+
+    def _report_usage(self, turn: int, usage: Optional[Dict[str, int]]) -> None:
+        """Usage of a turn that failed. The server accepts it even if the run has already stopped."""
+        if not usage:
+            return
+        try:
+            self._client.model_invocation(
+                turn, usage["input"], usage["output"], usage["latency"], "",
+                cacheReadInputTokens=usage["cache_read"], cacheCreationInputTokens=usage["cache_creation"],
+                stopReason="error", settledAttempts=usage["settled"])
+        except Exception as error:
+            log.warning("usage for turn %d not recorded, its reservation stays: %s", turn, type(error).__name__)
+
+    @contextlib.contextmanager
+    def _renewed_session(self, until: float) -> Iterator[None]:
+        done = threading.Event()
+
+        def renew() -> None:
+            while not done.wait(SESSION_RENEW_SECONDS) and self._clock() < until:
+                try:
+                    self._client.heartbeat()
+                except SessionEnded:
+                    return
+                except Exception as error:
+                    log.warning("session renewal failed: %s", type(error).__name__)
+
+        thread = threading.Thread(target=renew, daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            done.set()
+            thread.join(1.0)
 
     def _finish(self, run_id: str, outcome: str, reason: str, turns: int) -> RunResult:
         try:
             self._client.finish(outcome, reason)
-        except (SessionEnded, ApiError, Unreachable) as error:
+        except Exception as error:
             log.warning("finish for run %s not accepted: %s", run_id, type(error).__name__)
         log.info("run %s finished: %s (%s) after %d turns", run_id, outcome, reason, turns)
         return RunResult(run_id, outcome, turns, reason)
@@ -162,7 +230,17 @@ def main(argv: Optional[list] = None) -> int:
         return 2
     worker = Worker(Client(os.environ.get("FINMIND_API_URL", "http://127.0.0.1:5080"), token))
     while True:
-        result = worker.run_once()
+        try:
+            result = worker.run_once()
+        except SessionEnded:
+            log.error("the API rejected the worker credential.")
+            return 2
+        except Exception as error:
+            log.warning("claim failed: %s", type(error).__name__)
+            if args.once:
+                return 1
+            time.sleep(args.poll_seconds)
+            continue
         if args.once:
             return 0 if result is None or result.outcome != "failed" else 1
         if result is None:

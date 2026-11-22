@@ -539,6 +539,14 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             using var connection = dataSource.OpenConnection();
             using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
             var from = LockExistingRun(connection, transaction, runId);
+            if (from == RunStatus.Running)
+            {
+                // ADR-0013 A1: a retried initialize returns the original activation.
+                var funded = FindOpening(connection, transaction, runId)
+                    ?? throw new LedgerValidationException(LedgerReasonCode.LedgerInvariantViolation, "Running run has no opening journal.");
+                transaction.Commit();
+                return new OpenRunResult(funded.JournalId, true, true, funded.CashAccountId);
+            }
             RunLifecycle.EnsureTransition(from, RunStatus.Running);
             using var read = new NpgsqlCommand("SELECT config_snapshot::text FROM experiment_runs WHERE id = @id", connection, transaction);
             read.Parameters.AddWithValue("id", runId);
@@ -712,7 +720,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         return due.Select(e => e.Key).ToArray();
     }
 
-    public RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset expiresAt)
+    public RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset now, DateTimeOffset expiresAt)
     {
         Guid runId;
         using (var connection = dataSource.OpenConnection())
@@ -721,13 +729,28 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             using var select = new NpgsqlCommand(
                 "SELECT id FROM experiment_runs WHERE status = 'QUEUED' ORDER BY queued_at, id LIMIT 1 FOR UPDATE SKIP LOCKED",
                 connection, transaction);
-            if (select.ExecuteScalar() is not Guid claimed)
+            var reclaimed = false;
+            if (select.ExecuteScalar() is Guid claimed)
             {
-                transaction.Commit();
-                return null;
+                runId = claimed;
             }
-            runId = claimed;
-            UpdateRunStatus(connection, transaction, runId, RunStatus.Initializing, null);
+            else
+            {
+                // ADR-0013 A1: a claim whose response or worker was lost is offered again once its session expires.
+                using var stranded = new NpgsqlCommand(
+                    "SELECT r.id FROM experiment_runs r WHERE r.status = 'INITIALIZING' AND EXISTS (" +
+                    "SELECT 1 FROM run_sessions s WHERE s.run_id = r.id AND s.revoked_at IS NULL AND s.expires_at <= @now) " +
+                    "ORDER BY r.queued_at, r.id LIMIT 1 FOR UPDATE OF r SKIP LOCKED", connection, transaction);
+                stranded.Parameters.AddWithValue("now", now);
+                if (stranded.ExecuteScalar() is not Guid lost || !LockExpiredSession(connection, transaction, lost, now))
+                {
+                    transaction.Commit();
+                    return null;
+                }
+                runId = lost;
+                reclaimed = true;
+            }
+            if (!reclaimed) UpdateRunStatus(connection, transaction, runId, RunStatus.Initializing, null);
             RevokeSessions(connection, transaction, runId);
             using var insert = new NpgsqlCommand(
                 "INSERT INTO run_sessions (id, run_id, token_hash, expires_at) VALUES (@id, @run_id, @hash, @expires)",
@@ -737,11 +760,126 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             insert.Parameters.AddWithValue("hash", tokenHash);
             insert.Parameters.AddWithValue("expires", expiresAt);
             insert.ExecuteNonQuery();
-            AppendEvent(connection, transaction, runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ClaimRun,
-                RunStatus.Queued, RunStatus.Initializing, null, FinanceEvents.WorkerSource));
+            AppendEvent(connection, transaction, runId, reclaimed
+                ? FinanceEvents.RunReclaimed()
+                : FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ClaimRun,
+                    RunStatus.Queued, RunStatus.Initializing, null, FinanceEvents.WorkerSource));
             transaction.Commit();
         }
         return GetRun(runId);
+    }
+
+    // Re-read after the run lock, in a new statement: another claim or a heartbeat may have committed meanwhile.
+    private static bool LockExpiredSession(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, DateTimeOffset now)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT expires_at <= @now FROM run_sessions WHERE run_id = @run_id AND revoked_at IS NULL FOR UPDATE",
+            connection, transaction);
+        command.Parameters.AddWithValue("now", now);
+        command.Parameters.AddWithValue("run_id", runId);
+        return command.ExecuteScalar() is true;
+    }
+
+    public int FailRunsWithExpiredSessions(DateTimeOffset now)
+    {
+        using var connection = dataSource.OpenConnection();
+        var candidates = new List<Guid>();
+        using (var select = new NpgsqlCommand(
+            "SELECT r.id FROM run_sessions s JOIN experiment_runs r ON r.id = s.run_id " +
+            "WHERE s.revoked_at IS NULL AND s.expires_at <= @now AND r.status = 'RUNNING' ORDER BY s.expires_at LIMIT 500", connection))
+        {
+            select.Parameters.AddWithValue("now", now);
+            using var reader = select.ExecuteReader();
+            while (reader.Read()) candidates.Add(reader.GetGuid(0));
+        }
+
+        var failed = 0;
+        foreach (var runId in candidates)
+        {
+            using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+            if (LockExistingRun(connection, transaction, runId) == RunStatus.Running
+                && LockExpiredSession(connection, transaction, runId, now))
+            {
+                UpdateRunStatus(connection, transaction, runId, RunStatus.Failed, AgentGatewayRules.SessionExpiredReason);
+                RevokeSessions(connection, transaction, runId);
+                AppendEvent(connection, transaction, runId, FinanceEvents.RunStatusChanged(FinanceEvents.Operations.ExpireSession,
+                    RunStatus.Running, RunStatus.Failed, AgentGatewayRules.SessionExpiredReason, FinanceEvents.GatewaySource));
+                failed++;
+            }
+            transaction.Commit();
+        }
+        return failed;
+    }
+
+    public Guid? FindSession(byte[] tokenHash)
+    {
+        using var connection = dataSource.OpenConnection();
+        using var command = new NpgsqlCommand("SELECT run_id FROM run_sessions WHERE token_hash = @hash", connection);
+        command.Parameters.AddWithValue("hash", tokenHash);
+        return command.ExecuteScalar() as Guid?;
+    }
+
+    private static List<JsonObject> Reservations(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, string trace)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT payload::text FROM run_events WHERE run_id = @run_id AND event_type = 'MODEL_COST_RESERVED' AND trace_id = @trace",
+            connection, transaction);
+        command.Parameters.AddWithValue("run_id", runId);
+        command.Parameters.AddWithValue("trace", trace);
+        using var reader = command.ExecuteReader();
+        var reservations = new List<JsonObject>();
+        while (reader.Read()) reservations.Add(JsonNode.Parse(reader.GetString(0))!.AsObject());
+        return reservations;
+    }
+
+    // ADR-0013 A1: reserves the worst case of one request, under the run lock, before it is sent.
+    public ModelReservationResult ReserveModelCall(Guid runId, ModelReservation reservation)
+    {
+        using var connection = dataSource.OpenConnection();
+        using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+        var status = LockExistingRun(connection, transaction, runId);
+        var trace = FinanceEvents.TurnTrace(reservation.Turn);
+
+        long committed;
+        JsonObject snapshot;
+        using (var read = new NpgsqlCommand(
+            "SELECT model_cost_micro_usd + model_cost_reserved_micro_usd, coalesce(config_snapshot::text, '{}') " +
+            "FROM experiment_runs WHERE id = @id", connection, transaction))
+        {
+            read.Parameters.AddWithValue("id", runId);
+            using var reader = read.ExecuteReader();
+            reader.Read();
+            committed = reader.GetInt64(0);
+            snapshot = JsonNode.Parse(reader.GetString(1))!.AsObject();
+        }
+
+        ModelReservationResult result;
+        if (status != RunStatus.Running)
+            result = new(LedgerReasonCode.RunNotActive, 0, 0, committed);
+        else if (WallTimeExceeded(connection, transaction, runId))
+            result = new(Exhaust(connection, transaction, runId, LedgerReasonCode.WallTimeBudgetExceeded,
+                AgentGatewayRules.WallTimeExhaustedReason, trace), 0, 0, committed);
+        else if (Reservations(connection, transaction, runId, trace)
+                     .FirstOrDefault(p => AgentGatewayRules.Number(p, "attempt") == reservation.Attempt) is { } same)
+            result = new(null, AgentGatewayRules.Number(same, "maxOutputTokens"), AgentGatewayRules.Number(same, "reservedMicroUsd"), committed);
+        else if (AgentGatewayRules.Grant(snapshot, committed, reservation) is { } grant)
+        {
+            using var update = new NpgsqlCommand(
+                "UPDATE experiment_runs SET model_cost_reserved_micro_usd = model_cost_reserved_micro_usd + @cost WHERE id = @id",
+                connection, transaction);
+            update.Parameters.AddWithValue("cost", grant.CostMicroUsd);
+            update.Parameters.AddWithValue("id", runId);
+            update.ExecuteNonQuery();
+            AppendEvent(connection, transaction, runId,
+                FinanceEvents.ModelCostReserved(reservation, grant.MaxOutputTokens, grant.CostMicroUsd));
+            result = new(null, grant.MaxOutputTokens, grant.CostMicroUsd, committed + grant.CostMicroUsd);
+        }
+        else
+            result = new(Exhaust(connection, transaction, runId, LedgerReasonCode.CostBudgetExceeded,
+                AgentGatewayRules.CostExhaustedReason, trace), 0, 0, committed);
+
+        transaction.Commit();
+        return result;
     }
 
     public Guid? ResolveSession(byte[] tokenHash, DateTimeOffset now, DateTimeOffset newExpiresAt)
@@ -881,19 +1019,25 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                 return new ModelInvocationResult(null, true, used, cost);
             }
         }
-        if (status != RunStatus.Running)
+        var reservations = Reservations(connection, transaction, runId, trace);
+        // A stopped run still records a call that was reserved, because it was paid for.
+        if (status != RunStatus.Running && reservations.Count == 0)
         {
             transaction.Commit();
             return new ModelInvocationResult(LedgerReasonCode.RunNotActive, false, used, cost);
         }
 
-        var turnCost = AgentGatewayRules.CostOf(snapshot, invocation);
+        var settled = AgentGatewayRules.Settled(reservations, invocation);
+        var released = settled.Sum(p => AgentGatewayRules.Number(p, "reservedMicroUsd"));
+        var turnCost = AgentGatewayRules.CostOf(snapshot, invocation, settled.Length);
         AppendEvent(connection, transaction, runId, FinanceEvents.ModelInvocationCompleted(invocation, turnCost));
         used = checked(used + invocation.BudgetTokens);
         cost = checked(cost + turnCost);
         using (var update = new NpgsqlCommand(
-            "UPDATE experiment_runs SET model_tokens_used = @used, model_cost_micro_usd = @cost WHERE id = @id", connection, transaction))
+            "UPDATE experiment_runs SET model_tokens_used = @used, model_cost_micro_usd = @cost, " +
+            "model_cost_reserved_micro_usd = model_cost_reserved_micro_usd - @released WHERE id = @id", connection, transaction))
         {
+            update.Parameters.AddWithValue("released", released);
             update.Parameters.AddWithValue("used", used);
             update.Parameters.AddWithValue("cost", cost);
             update.Parameters.AddWithValue("id", runId);
@@ -901,7 +1045,9 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         }
 
         LedgerReasonCode? denial = null;
-        if (WallTimeExceeded(connection, transaction, runId))
+        if (status != RunStatus.Running)
+            denial = LedgerReasonCode.RunNotActive;
+        else if (WallTimeExceeded(connection, transaction, runId))
             denial = Exhaust(connection, transaction, runId, LedgerReasonCode.WallTimeBudgetExceeded, AgentGatewayRules.WallTimeExhaustedReason, trace);
         else if (used > AgentGatewayRules.MaxModelTokens(snapshot))
             denial = Exhaust(connection, transaction, runId, LedgerReasonCode.TokenBudgetExceeded, AgentGatewayRules.TokenExhaustedReason, trace);

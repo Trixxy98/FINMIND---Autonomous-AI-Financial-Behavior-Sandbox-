@@ -67,14 +67,37 @@ public static class PricingCatalog
     private const long HaikuLongPromptThreshold = 100_000;
     private static readonly ModelPrice HaikuLongPrompt = new(500_000, 2_500_000, 50_000, 625_000);
 
-    public static long CostMicroUsd(string provider, string modelId, long inputTokens, long outputTokens, long cacheReadTokens, long cacheWriteTokens)
+    // requests: how many requests the totals cover. The long-prompt tier is per request, not per turn.
+    public static long CostMicroUsd(string provider, string modelId, long inputTokens, long outputTokens, long cacheReadTokens,
+        long cacheWriteTokens, int requests = 1)
     {
         if (provider != "anthropic") return 0;
+        var price = PriceFor(modelId, (inputTokens + cacheReadTokens + cacheWriteTokens) / Math.Max(requests, 1));
+        return price.Cost(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
+    }
+
+    // ADR-0013 A1: every input token at the dearest input rate, and every allowed output token used.
+    public static long WorstCaseMicroUsd(string modelId, long inputTokens, long maxOutputTokens)
+    {
+        var price = PriceFor(modelId, inputTokens);
+        var dearest = price with { Input = Math.Max(price.Input, price.CacheWrite) };
+        return dearest.Cost(inputTokens, maxOutputTokens, 0, 0);
+    }
+
+    // The most output tokens whose worst case still fits in the remaining budget. May be zero or negative.
+    public static long AffordableOutputTokens(string modelId, long inputTokens, long remainingMicroUsd)
+    {
+        var price = PriceFor(modelId, inputTokens);
+        return (checked(remainingMicroUsd * 1_000_000) - checked(inputTokens * Math.Max(price.Input, price.CacheWrite))) / price.Output;
+    }
+
+    private static ModelPrice PriceFor(string modelId, long promptTokens)
+    {
         var price = Standard.TryGetValue(modelId, out var known)
             ? known
             : throw new InvalidOperationException($"No price for model {modelId}.");
-        if (modelId == "claude-haiku-5-5" && inputTokens + cacheReadTokens + cacheWriteTokens > HaikuLongPromptThreshold)
+        if (modelId == "claude-haiku-5-5" && promptTokens > HaikuLongPromptThreshold)
             price = HaikuLongPrompt;
-        return price.Cost(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
+        return price;
     }
 }

@@ -1,6 +1,6 @@
 """Manual smoke run with real Claude (ADR-0012). Spends real money; run only on purpose.
 
-Creates one short S01 run (3 virtual days, at most US$0.50), runs it with the real Claude adapter, and checks
+Creates one short S01 run (3 virtual days, US$0.50 budget by our price table), runs it with the real Claude adapter, and checks
 the trace with the same rules as the end-to-end tests. Other queued mock runs it meets are run as mocks;
 other queued Claude runs are refused (marked failed) so this script never spends money on them.
 
@@ -67,6 +67,11 @@ def main() -> int:
     tool_results = [e for e in events if e["eventType"] == "TOOL_RETURNED"]
     cost = sum(e["payload"]["costMicroUsd"] for e in invocations)
     print(f"status {run['status']} ({run['statusReason']}), turns {len(invocations)}, tool calls {len(tool_results)}")
+    settled = {e["traceId"] for e in invocations}
+    unrecorded = [e for e in events if e["eventType"] == "MODEL_COST_RESERVED" and e["traceId"] not in settled]
+    if unrecorded:
+        held = sum(e["payload"]["reservedMicroUsd"] for e in unrecorded)
+        print(f"billing unknown for {len(unrecorded)} request(s): up to US${held / 1_000_000:.4f} more, check the Console")
     print(f"cost US${cost / 1_000_000:.4f}, cache reads {sum(e['payload']['cacheReadInputTokens'] for e in invocations)} tokens")
     print("tool outcomes:", sorted({(e['payload']['tool'], e['payload']['status']) for e in tool_results}))
     intact = http("GET", f"/internal/runs/{run_id}/events/verify")["intact"]
