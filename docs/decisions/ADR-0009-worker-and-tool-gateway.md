@@ -255,8 +255,10 @@ Model messages and token usage are runtime events defined in ADR-0011.
   response is not stored.
 - Internal errors are not stored as tool results. The API returns HTTP 500
   and the worker retries the same `toolCallId`.
-- Transport errors: invalid `toolCallId` or body shape → HTTP 400; body over
-  16 KB → HTTP 413; bad or missing session → HTTP 401.
+- Transport errors: bad or missing session → HTTP 401. An unreadable tool
+  call (invalid `toolCallId` or shape, not JSON, over 16 KB) is recorded and
+  answered as `INVALID_TOOL_ARGUMENTS` with the field `(unreadable)`
+  (amended by ADR-0013 item 18; previously 400 and 413).
 - Worker credentials are compared as SHA-256 hashes with a fixed-time
   comparison. Worker routes are not mapped unless `FINMIND_WORKER_TOKEN` has
   at least 32 characters; the API logs a warning instead.

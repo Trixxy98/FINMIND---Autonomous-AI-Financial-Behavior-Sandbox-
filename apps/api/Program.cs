@@ -251,30 +251,11 @@ if (workerToken is { Length: >= 32 })
     worker.MapPost("/session/tool-calls", async (HttpRequest request, ToolGateway gateway) =>
     {
         if (gateway.ResolveSession(Bearer(request)) is not { } runId) return Results.StatusCode(401);
-        if (request.ContentLength is > 16_384) return Results.StatusCode(413);
-        var buffer = new byte[16_385];
-        var length = 0;
-        int read;
-        while ((read = await request.Body.ReadAsync(buffer.AsMemory(length))) > 0)
-        {
-            length += read;
-            if (length > 16_384) return Results.StatusCode(413);
-        }
-
-        JsonObject? body;
-        var hadInvalidUnicode = false;
-        try
-        {
-            (var parsed, hadInvalidUnicode) = AgentText.Parse(buffer.AsSpan(0, length));
-            body = parsed?.AsObject();
-        }
-        catch (Exception) { body = null; }
-        if (body is null || body.Any(p => p.Key is not ("toolCallId" or "tool" or "arguments"))
-            || (string?)(body["toolCallId"] as JsonValue) is not { } toolCallId || !ToolGateway.IsValidToolCallId(toolCallId)
-            || (string?)(body["tool"] as JsonValue) is not { Length: >= 1 and <= 100 } tool)
-            return Results.BadRequest(new { error = "Body must be { toolCallId, tool, arguments } with a printable toolCallId of 1-100 characters." });
-
-        return Execute(() => Results.Json(gateway.Execute(runId, toolCallId, tool, body["arguments"]?.DeepClone(), hadInvalidUnicode)));
+        // ADR-0013 item 18: an authenticated tool call is always recorded, readable or not.
+        var (call, unreadable) = await ToolCallBody.Read(request.Body);
+        return Execute(() => Results.Json(call is not null
+            ? gateway.Execute(runId, call.ToolCallId, call.Tool, call.Arguments, call.HadInvalidUnicode)
+            : gateway.RecordUnreadable(runId, unreadable!)));
     });
 
     worker.MapPost("/session/model-reservations", (HttpRequest request, JsonObject? body, ToolGateway gateway) =>

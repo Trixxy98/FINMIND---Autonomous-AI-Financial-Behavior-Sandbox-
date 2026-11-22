@@ -142,11 +142,7 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
             return Complete(runId, toolCallId, safeTool, Rejected(denial));
 
         if (hadInvalidUnicode)
-        {
-            var unreadable = Rejected(LedgerReasonCode.InvalidToolArguments);
-            unreadable["data"] = new JsonObject { ["fields"] = new JsonArray("(invalid_unicode)") };
-            return Complete(runId, toolCallId, safeTool, unreadable);
-        }
+            return Complete(runId, toolCallId, safeTool, Malformed("(invalid_unicode)"));
 
         if (!ToolCatalog.Tools.TryGetValue(tool, out var definition))
         {
@@ -181,6 +177,30 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
         {
             return Complete(runId, toolCallId, safeTool, Rejected(exception.ReasonCode));
         }
+    }
+
+    // ADR-0013 item 18: an attempt, counted like any other, that is never executed.
+    public JsonObject RecordUnreadable(Guid runId, UnreadableToolCall call)
+    {
+        var details = new JsonObject
+        {
+            ["_unreadable"] = new JsonObject { ["bytes"] = call.Bytes, ["sha256"] = call.Sha256, ["problem"] = call.Problem }
+        };
+        var begin = ledger.BeginToolCall(runId, call.ToolCallId, call.Tool, details, "unreadable:" + call.Sha256);
+        return begin.Kind switch
+        {
+            ToolCallBeginKind.Replay => begin.StoredResponse!,
+            ToolCallBeginKind.Conflict => Rejected(LedgerReasonCode.ToolCallIdConflict),
+            _ => Complete(runId, call.ToolCallId, call.Tool,
+                begin.Denial is { } denial ? Rejected(denial) : Malformed("(unreadable)"))
+        };
+    }
+
+    private static JsonObject Malformed(string field)
+    {
+        var response = Rejected(LedgerReasonCode.InvalidToolArguments);
+        response["data"] = new JsonObject { ["fields"] = new JsonArray(field) };
+        return response;
     }
 
     private (JsonObject Response, PendingEvent? Extra) Run(Guid runId, string toolCallId, string tool, JsonObject args, JsonObject redacted)

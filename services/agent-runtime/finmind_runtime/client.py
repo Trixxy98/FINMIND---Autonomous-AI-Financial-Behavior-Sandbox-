@@ -100,7 +100,12 @@ class Client:
 
     def tool_call(self, tool_call_id: str, tool: str, arguments: Any) -> Dict[str, Any]:
         payload = {"toolCallId": tool_call_id, "tool": cut(tool, MAX_TOOL_NAME_UNITS) or "(empty)", "arguments": arguments}
-        size = len(json.dumps(payload).encode("utf-8"))
+        try:
+            size = len(json.dumps(payload).encode("utf-8"))
+        except (ValueError, RecursionError) as error:
+            # No tool accepts this field either: the attempt is still sent, and recorded as malformed.
+            payload["arguments"] = {"_unserializable_arguments": type(error).__name__}
+            size = 0
         if size > MAX_TOOL_CALL_BYTES:
             # No tool accepts this field, so the gateway records the attempt as malformed and the agent is told.
             payload["arguments"] = {"_oversized_arguments_bytes": size}
