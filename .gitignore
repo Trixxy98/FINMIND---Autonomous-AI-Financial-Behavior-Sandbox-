@@ -9,3 +9,4 @@ obj/
 __pycache__/
 *.py[cod]
 *.tsbuildinfo
+build-test/
