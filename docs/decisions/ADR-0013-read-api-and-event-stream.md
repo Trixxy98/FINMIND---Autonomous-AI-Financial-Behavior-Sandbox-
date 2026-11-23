@@ -1,6 +1,6 @@
 # FINMIND ADR 0013: Researcher Read API and Event Stream
 
-- Status: Part A accepted (implemented); part B accepted: B1 (read API) and B2 (event stream) implemented; Part B proposed
+- Status: Implemented (part A: corrections 1 to 19; part B: B1 read API and B2 event stream)
 - Date: 22 November 2026
 - Scope: prerequisite corrections to Phase 2, then the read API and SSE stream for the Phase 3 UI
 
