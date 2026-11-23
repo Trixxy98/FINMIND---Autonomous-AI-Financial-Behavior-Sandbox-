@@ -1,6 +1,6 @@
 # FINMIND ADR 0013: Researcher Read API and Event Stream
 
-- Status: Part A accepted (implemented); part B accepted: B1 (read API) implemented, B2 (event stream) pending; Part B proposed
+- Status: Part A accepted (implemented); part B accepted: B1 (read API) and B2 (event stream) implemented; Part B proposed
 - Date: 22 November 2026
 - Scope: prerequisite corrections to Phase 2, then the read API and SSE stream for the Phase 3 UI
 
@@ -204,6 +204,19 @@ All routes are under `/api/v1` and require the researcher credential.
   until commit (migration 007), so a cursor cannot skip a late commit.
 - Heartbeat every 15 seconds. After a terminal status and the last event,
   send `end` and close.
+
+#### Stream details (B2, decided 23 November 2026)
+
+- A usage report can arrive after a run is terminal (A1), so `end` is sent
+  once the run is terminal and no event has arrived for 5 seconds. Its data
+  is `{status, lastSequence}`. A later event, if any, is read by
+  reconnecting with `Last-Event-ID`.
+- A legacy run has no lifecycle; its stream sends `end` once it has caught up.
+- `Last-Event-ID` wins over `afterSequence`. A cursor that is not a
+  non-negative integer is a 400. An unknown run is a 404 before the stream
+  starts.
+- Each poll reads at most 500 events on its own connection and releases it
+  before waiting.
 
 ### Researcher credential
 

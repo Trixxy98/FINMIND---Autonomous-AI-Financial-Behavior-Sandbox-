@@ -307,5 +307,14 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
         return actions;
     }
 
+    // For the event stream: whether the run is managed, and its status. Null when the run does not exist.
+    public (bool Managed, string? Status) Status(Guid runId) => Read((connection, transaction) =>
+    {
+        using var command = Command(connection, transaction, "SELECT status FROM experiment_runs WHERE id = @id", ("id", runId));
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) throw new LedgerValidationException(LedgerReasonCode.RunNotFound, "Run does not exist.");
+        return reader.IsDBNull(0) ? (false, (string?)null) : (true, reader.GetString(0));
+    });
+
     public bool RunExists(Guid runId) => Read((connection, transaction) => Exists(connection, transaction, runId));
 }

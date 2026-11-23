@@ -257,6 +257,16 @@ research.MapGet("/runs/{runId:guid}/events", (Guid runId, long? afterSequence, i
         var events = ledger.GetEvents(runId, after, Limit(limit));
         return Results.Ok(new { runId, events, nextAfterSequence = events.Count > 0 ? events[^1].Sequence : after });
     }, isRead: true));
+// ADR-0013 B2: server-sent events. Resume with Last-Event-ID or afterSequence.
+research.MapGet("/runs/{runId:guid}/stream", async (Guid runId, string? afterSequence, HttpContext context,
+    ResearchReads reads, PostgresLedger ledger) =>
+{
+    if (EventStream.Cursor(context.Request.Headers["Last-Event-ID"], afterSequence) is not { } cursor) return Invalid("cursor");
+    if (!reads.RunExists(runId)) return NotFound();
+    await EventStream.Run(context, runId, cursor, ledger, reads);
+    return Results.Empty;
+});
+
 research.MapGet("/scenarios", () => Results.Ok(new
 {
     scenarios = ScenarioCatalog.All.Values.OrderBy(s => s.Id, StringComparer.Ordinal).ThenBy(s => s.Version).Select(s => new
