@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -83,6 +84,23 @@ def to_claude_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """finmind-tools/v1 schemas (claim response) to Anthropic tool definitions, in the order received."""
     return [{"name": tool["name"], "description": tool["description"], "input_schema": tool["parameters"]}
             for tool in tools]
+
+
+def _unrepresentable(value: Any, depth: int = 0) -> bool:
+    """True if the value cannot be sent back unchanged: a lone surrogate, or a non-finite number (ADR-0013 item 19)."""
+    if depth > 200:
+        return False
+    if isinstance(value, str):
+        return any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(_unrepresentable(k, depth + 1) or _unrepresentable(v, depth + 1) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_unrepresentable(item, depth + 1) for item in value)
+    if hasattr(value, "__dict__"):
+        return _unrepresentable(vars(value), depth + 1)
+    return False
 
 
 def _usage(response: Any, name: str) -> int:
@@ -170,7 +188,11 @@ class ClaudeAgent(Agent):
         tool_uses = [block for block in response.content if block.type == "tool_use"]
         self._pending = [block.id for block in tool_uses]
         text = "\n".join(block.text for block in response.content if block.type == "text")
-        return Decision(calls=[(block.name, block.input) for block in tool_uses], output_text=text, **common)
+        # The SDK cannot send such a response back unchanged, and history is never edited (ADR-0012), so the
+        # turn's calls are still recorded and then the run ends (ADR-0013 item 19).
+        terminal = "unrepresentable" if _unrepresentable(response.content) else None
+        return Decision(calls=[(block.name, block.input) for block in tool_uses], output_text=text, terminal=terminal,
+                        **common)
 
     def _append_tool_results(self, results: List[Any]) -> None:
         if len(results) != len(self._pending):

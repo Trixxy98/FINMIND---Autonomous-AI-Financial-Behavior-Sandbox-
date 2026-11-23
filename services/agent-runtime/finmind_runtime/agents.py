@@ -39,7 +39,8 @@ class Decision:
     model: Optional[str] = None
     stop_reason: Optional[str] = None
     refusal_category: Optional[str] = None
-    terminal: Optional[str] = None  # "refusal" or "max_tokens": the worker ends the run
+    # "refusal" or "max_tokens": the worker ends the run. "unrepresentable": it records the calls first.
+    terminal: Optional[str] = None
 
     @property
     def tool_calls(self) -> List[Tuple[str, Any]]:

@@ -27,7 +27,8 @@ TERMINAL_REASONS = {"RUN_NOT_ACTIVE", "ACTION_BUDGET_EXCEEDED", "WALL_TIME_BUDGE
                     "COST_BUDGET_EXCEEDED"}
 SESSION_RENEW_SECONDS = 60.0  # sessions last 10 minutes; a model call can last as long (ADR-0013 A1)
 RENEW_GRACE_SECONDS = 60.0    # past the deadline a hung worker stops renewing and the server fails the run
-MAX_IDLE_TURNS = 3  # consecutive turns without tool calls before the run ends (ADR-0012)
+MAX_IDLE_TURNS = 3
+UNREPRESENTABLE_REASON = "unrepresentable tool input"  # ADR-0013 item 19; reported separately from other failures  # consecutive turns without tool calls before the run ends (ADR-0012)
 
 
 class ReservationDenied(Exception):
@@ -140,6 +141,8 @@ class Worker:
                 if decision.terminal == "max_tokens":
                     return self._finish(run_id, "failed", "model output limit reached twice", turn)
 
+                if decision.terminal == "unrepresentable" and not calls:
+                    return self._finish(run_id, "failed", UNREPRESENTABLE_REASON, turn)
                 if not calls:
                     idle_turns += 1
                     if idle_turns >= MAX_IDLE_TURNS:
@@ -159,6 +162,8 @@ class Worker:
                     # After the virtual duration ends, agents read their balance and call finish.
                     if tool == "finish" and response.get("status") == "ok":
                         return self._finish(run_id, "completed", "agent finished", turn)
+                if decision.terminal == "unrepresentable":
+                    return self._finish(run_id, "failed", UNREPRESENTABLE_REASON, turn)
                 last_tool, last_response = last_results[-1]
         except SessionEnded:
             return RunResult(run_id, "stopped", turn, "session ended")

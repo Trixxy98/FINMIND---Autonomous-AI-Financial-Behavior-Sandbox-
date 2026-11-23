@@ -1,6 +1,6 @@
 # FINMIND ADR 0013: Researcher Read API and Event Stream
 
-- Status: Part A accepted (A1, A2, and items 16 to 18 implemented; A3 and A4 pending; item 19 proposed); Part B proposed
+- Status: Part A accepted (A1, A2, and items 16 to 19 implemented; A3 and A4 pending); Part B proposed
 - Date: 22 November 2026
 - Scope: prerequisite corrections to Phase 2, then the read API and SSE stream for the Phase 3 UI
 
@@ -98,11 +98,14 @@ Evidence: **R** reproduced on 22 November 2026, **C** found by reading code.
   the hash, so a retry of the same body replays.
 - Arguments the worker cannot serialise are sent as a malformed attempt.
 
-#### Found while implementing item 18: not yet approved
+#### Found while implementing item 18: approved 23 November 2026
 
-| # | Defect | Evidence | Proposed correction |
+| # | Defect | Evidence | Correction |
 |---|---|---|---|
 | 19 | Items 17 and 18 record the attempt, but a Claude run cannot always continue. With a lone surrogate the SDK cannot send the history and the next turn fails as `UnicodeEncodeError`. With a non-finite number the SDK does not send the value it received, so history changes silently | R (offline SDK, mock transport); the real API's behavior is untested | After recording such a turn, end the run with the explicit reason `unrepresentable tool input`, without editing history, and report these runs separately |
+
+Item 19 is implemented in the adapter and worker; the real API's handling of
+such a response is still untested.
 
 ### A3. Trust boundary
 

@@ -111,6 +111,12 @@ One model invocation = one `messages.create` call:
   change to history; a second occurrence fails the run.
 - `stop_reason: "refusal"`: see below.
 
+- Unrepresentable output (amended by ADR-0013 item 19): a response holding a
+  lone surrogate or a non-finite number cannot be sent back unchanged, and
+  history is never edited. Its calls are recorded, then the run ends as
+  `failed` with the reason `unrepresentable tool input`. Reports count these
+  runs separately from other failures.
+
 ### Refusals
 
 Claude's safety classifiers may decline a request (`stop_reason: "refusal"`
