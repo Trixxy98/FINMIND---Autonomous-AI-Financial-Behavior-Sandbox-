@@ -241,6 +241,27 @@ research.MapGet("/runs", (string? status, string? kind, int? limit, Guid? before
     if (kind is not (null or "managed" or "legacy")) return Invalid("kind");
     return Execute(() => Results.Ok(reads.ListRuns(status, managed, Limit(limit), before)), isRead: true);
 });
+// ADR-0014: run control for the UI. Same ledger rules and events as the /internal routes.
+research.MapPost("/runs", (JsonObject? config, PostgresLedger ledger) =>
+    Execute(() =>
+    {
+        var run = ledger.CreateManagedRun(config, codeRevision);
+        return Results.Created($"/api/v1/runs/{run.RunId}", run);
+    }));
+research.MapPost("/runs/{runId:guid}/start", (Guid runId, ResearchReads reads, PostgresLedger ledger) =>
+    Execute(() => reads.RunExists(runId)
+        ? Results.Ok(ledger.TransitionRun(runId, RunStatus.Queued, null, FinanceEvents.InternalApiSource)) : NotFound()));
+research.MapPost("/runs/{runId:guid}/cancel", (Guid runId, CancelRunRequest? request, ResearchReads reads, PostgresLedger ledger) =>
+    Execute(() => reads.RunExists(runId)
+        ? Results.Ok(ledger.TransitionRun(runId, RunStatus.Cancelled, request?.Reason, FinanceEvents.InternalApiSource)) : NotFound()));
+research.MapGet("/runs/{runId:guid}/verify", (Guid runId, ResearchReads reads, PostgresLedger ledger) =>
+    Execute(() =>
+    {
+        if (!reads.RunExists(runId)) return NotFound();
+        var broken = ledger.VerifyEventChain(runId);
+        return Results.Ok(new { runId, intact = broken is null, brokenAtSequence = broken });
+    }, isRead: true));
+
 research.MapGet("/runs/{runId:guid}", (Guid runId, ResearchReads reads) =>
     Execute(() => reads.GetRun(runId) is { } run ? Results.Ok(run) : NotFound(), isRead: true));
 research.MapGet("/runs/{runId:guid}/wallets", (Guid runId, ResearchReads reads) =>

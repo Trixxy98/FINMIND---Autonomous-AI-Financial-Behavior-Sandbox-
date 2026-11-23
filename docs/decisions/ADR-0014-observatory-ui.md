@@ -1,6 +1,6 @@
 # FINMIND ADR 0014: Observatory UI (Phase 3)
 
-- Status: Proposed
+- Status: Accepted 23 November 2026 (step 1 implemented)
 - Date: 23 November 2026
 - Scope: the Phase 3 web screens, the API additions they need, and how the
   browser shows evidence

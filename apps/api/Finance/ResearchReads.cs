@@ -276,6 +276,7 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
     {
         using var command = Command(connection, transaction,
             "SELECT t.tool_call_id, t.tool_name, t.arguments_redacted::text, t.outcome, t.reason_code, p.sequence, " +
+            "t.response::text, " +
             "(SELECT r.sequence FROM run_events r WHERE r.run_id = t.run_id AND r.event_type = 'TOOL_RETURNED' AND r.trace_id = t.tool_call_id), " +
             "(SELECT c.journal_id FROM run_events c WHERE c.run_id = t.run_id AND c.event_type = 'LEDGER_COMMITTED' " +
             " AND c.trace_id = t.tool_call_id ORDER BY c.sequence LIMIT 1), t.created_at " +
@@ -288,7 +289,7 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
         {
             var tool = reader.GetString(1);
             var outcome = reader.IsDBNull(3) ? null : reader.GetString(3);
-            Guid? committed = reader.IsDBNull(7) ? null : reader.GetGuid(7);
+            Guid? committed = reader.IsDBNull(8) ? null : reader.GetGuid(8);
             actions.Add(new JsonObject
             {
                 ["toolCallId"] = reader.GetString(0),
@@ -298,10 +299,12 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
                 ["reasonCode"] = reader.IsDBNull(4) ? null : reader.GetString(4),
                 ["journalId"] = committed,
                 ["evidence"] = ActionEvidence.Of(tool, outcome, committed),
-                ["complete"] = !reader.IsDBNull(6),
+                // ADR-0014: what the agent received, as stored (already redacted). Its observation for the next turn.
+                ["response"] = reader.IsDBNull(6) ? null : JsonNode.Parse(reader.GetString(6)),
+                ["complete"] = !reader.IsDBNull(7),
                 ["proposedSequence"] = reader.GetInt64(5),
-                ["returnedSequence"] = reader.IsDBNull(6) ? null : reader.GetInt64(6),
-                ["proposedAt"] = reader.GetFieldValue<DateTimeOffset>(8)
+                ["returnedSequence"] = reader.IsDBNull(7) ? null : reader.GetInt64(7),
+                ["proposedAt"] = reader.GetFieldValue<DateTimeOffset>(9)
             });
         }
         return actions;
