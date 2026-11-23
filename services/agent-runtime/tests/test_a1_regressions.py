@@ -189,7 +189,7 @@ class ContainmentTests(unittest.TestCase):
 
     def test_main_survives_an_unreachable_api_and_reports_a_bad_credential(self):
         for error, code in ((Unreachable(), 1), (ApiError(404, None), 1), (SessionEnded(), 2)):
-            with self.subTest(error=repr(error)), mock.patch.dict(os.environ, {"FINMIND_WORKER_TOKEN": "x" * 32}), \
+            with self.subTest(error=repr(error)), mock.patch.dict(os.environ, {"FINMIND_WORKER_TOKEN": "x" * 32}, clear=True), \
                     mock.patch.object(worker, "Client", lambda *args: FakeApi(claim_error=error)), \
                     contextlib.redirect_stderr(None):
                 self.assertEqual(worker.main(["--once"]), code)

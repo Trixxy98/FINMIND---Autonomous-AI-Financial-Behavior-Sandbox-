@@ -60,3 +60,9 @@ from the application database.
 - Direct TRUNCATE and schema changes fail.
 - The API login cannot change account rows or unrelated run fields.
 - Rejected operations do not change balances or history.
+## Amendment (ADR-0013 A3)
+
+The API now refuses to start when its database role is a superuser, can
+create roles or databases, bypasses row-level security, or owns tables in
+the `public` schema, or when the role cannot be checked. Its settings live
+in `.env.api`, which holds no owner password.

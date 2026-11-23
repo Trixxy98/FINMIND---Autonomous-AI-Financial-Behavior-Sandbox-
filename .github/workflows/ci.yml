@@ -100,10 +100,13 @@ jobs:
           ConnectionStrings__Finmind: ${{ env.FINMIND_API_TEST_DATABASE }}
         run: |
           token="$(openssl rand -hex 24)"
+          researcher="$(openssl rand -hex 24)"
           echo "::add-mask::$token"
+          echo "::add-mask::$researcher"
           echo "FINMIND_WORKER_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "FINMIND_RESEARCHER_TOKEN=$researcher" >> "$GITHUB_ENV"
           echo "FINMIND_E2E_API_URL=http://127.0.0.1:5080" >> "$GITHUB_ENV"
-          FINMIND_WORKER_TOKEN="$token" FINMIND_CODE_REVISION="$GITHUB_SHA" \
+          FINMIND_WORKER_TOKEN="$token" FINMIND_RESEARCHER_TOKEN="$researcher" FINMIND_CODE_REVISION="$GITHUB_SHA" \
             nohup dotnet apps/api/bin/Release/net10.0/Finmind.Api.dll > "$RUNNER_TEMP/api.log" 2>&1 &
           for attempt in $(seq 1 30); do
             curl -sf http://127.0.0.1:5080/health > /dev/null && exit 0

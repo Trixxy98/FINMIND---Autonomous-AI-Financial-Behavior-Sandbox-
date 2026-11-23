@@ -1,6 +1,6 @@
 # FINMIND ADR 0013: Researcher Read API and Event Stream
 
-- Status: Part A accepted (A1, A2, and items 16 to 19 implemented; A3 and A4 pending); Part B proposed
+- Status: Part A accepted (implemented; part B proposed); Part B proposed
 - Date: 22 November 2026
 - Scope: prerequisite corrections to Phase 2, then the read API and SSE stream for the Phase 3 UI
 
@@ -115,11 +115,32 @@ such a response is still untested.
 | 13 | The README worker command sources `.env`, giving the worker the database owner password, contrary to ADR-0009 and ADR-0011. The API receives the owner password the same way, weakening ADR-0004 | R | Separate environment files for owner/tests, API, and worker |
 | 14 | Vite listens on `0.0.0.0`; an API proxy would expose researcher routes to the network | C | Bind to `127.0.0.1` |
 
+#### A3 as implemented
+
+- `RequestGuard` runs before routing. Every route needs `Host` to be
+  `127.0.0.1:5080` or `localhost:5080`, and an `Origin`, if sent, from
+  `FINMIND_ALLOWED_ORIGINS` (default: the Vite dev server). Researcher
+  routes need the researcher token; worker routes and `/health` keep their
+  own rules. Without a researcher token, researcher routes answer 401.
+- The API refuses to start when its database role is privileged or owns
+  tables, when the role cannot be checked, when an Anthropic credential is
+  set, or when the two tokens are equal. The worker refuses database,
+  researcher, and password-bearing settings.
+- One environment file per process: `.env` (Compose and owner), `.env.api`,
+  `.env.worker`, `.env.test`.
+- Vite binds `127.0.0.1:5173` with a fixed port.
+
 ### A4. Incorrect evidence
 
 | # | Defect | Evidence | Correction |
 |---|---|---|---|
 | 15 | ADR-0011 cites end-to-end tests of parallel run isolation. No such test exists | R | Add the test; until then the Phase 2 gate is not fully evidenced |
+
+Item 15: `tests/test_parallel_isolation.py` runs six mock runs on six
+workers at once. It checks that no event, account, or posting crosses runs,
+and that each run's trace equals the same configuration run alone. The test
+passed on the existing code. The defect was the missing evidence, not a
+behavior.
 
 Each correction gets a regression test that fails before the fix.
 

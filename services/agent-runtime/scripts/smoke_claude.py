@@ -24,21 +24,23 @@ from finmind_runtime.worker import Worker  # noqa: E402
 
 API = os.environ.get("FINMIND_API_URL", "http://127.0.0.1:5080")
 TOKEN = os.environ.get("FINMIND_WORKER_TOKEN", "")
+RESEARCHER = os.environ.get("FINMIND_RESEARCHER_TOKEN", "")  # creating and reading runs is the researcher's part
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "claude-opus-5-5"
 MAX_COST_MICRO_USD = 500_000
 
 
 def http(method, path, payload=None):
     data = None if payload is None else json.dumps(payload).encode()
-    request = urllib.request.Request(API + path, data=data, method=method, headers={"Content-Type": "application/json"})
+    request = urllib.request.Request(API + path, data=data, method=method,
+                                     headers={"Content-Type": "application/json", "Authorization": "Bearer " + RESEARCHER})
     with urllib.request.urlopen(request, timeout=30) as response:
         raw = response.read()
         return json.loads(raw) if raw else None
 
 
 def main() -> int:
-    if len(TOKEN) < 32:
-        print("Set FINMIND_WORKER_TOKEN (at least 32 characters, same as the API).")
+    if len(TOKEN) < 32 or len(RESEARCHER) < 32:
+        print("Set FINMIND_WORKER_TOKEN and FINMIND_RESEARCHER_TOKEN (at least 32 characters each, as the API has them).")
         return 2
     marker = f"Manage the provided virtual funds responsibly. [smoke {uuid.uuid4().hex[:8]}]"
     run_id = http("POST", "/internal/runs", {

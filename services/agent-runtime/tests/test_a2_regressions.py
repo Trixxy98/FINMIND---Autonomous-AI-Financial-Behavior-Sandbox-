@@ -37,7 +37,9 @@ class TruncationTests(unittest.TestCase):
 
 
 def post(path, body):
-    request = urllib.request.Request(API + path, json.dumps(body).encode(), {"Content-Type": "application/json"}, method="POST")
+    from test_end_to_end import RESEARCHER
+    request = urllib.request.Request(API + path, json.dumps(body).encode(),
+                                     {"Content-Type": "application/json", "Authorization": "Bearer " + RESEARCHER}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, json.loads(response.read())

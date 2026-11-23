@@ -12,6 +12,31 @@ builder.Services.AddSingleton<PostgresLedger>();
 builder.Services.AddSingleton(sp => new ToolGateway(sp.GetRequiredService<PostgresLedger>(), TimeProvider.System));
 var app = builder.Build();
 
+// ADR-0013 A3: refuse to start with unsafe settings or a privileged database role.
+var unsafeSettings = StartupChecks.Problems(name => builder.Configuration[name]).ToList();
+if (StartupChecks.PrivilegedRole(app.Services.GetRequiredService<NpgsqlDataSource>()) is { } roleProblem)
+    unsafeSettings.Add(roleProblem);
+if (unsafeSettings.Count > 0)
+    throw new InvalidOperationException("Refusing to start: " + string.Join(" ", unsafeSettings));
+
+var guard = RequestGuardOptions.Create(builder.Configuration["FINMIND_RESEARCHER_TOKEN"], builder.Configuration["FINMIND_ALLOWED_ORIGINS"]);
+if (!guard.ResearcherConfigured)
+    app.Logger.LogWarning("FINMIND_RESEARCHER_TOKEN is missing or shorter than 32 characters; researcher routes answer 401.");
+app.Use(async (context, next) =>
+{
+    var authorization = context.Request.Headers.Authorization.ToString();
+    var bearer = authorization.StartsWith("Bearer ", StringComparison.Ordinal) ? authorization["Bearer ".Length..].Trim() : null;
+    if (RequestGuard.Check(context.Request.Path.Value ?? "", context.Request.Host.Value ?? "",
+            context.Request.Headers.Origin.ToString(), bearer, guard) is { } refused)
+    {
+        if (refused == 401) context.Response.Headers.WWWAuthenticate = "Bearer";
+        context.Response.StatusCode = refused;
+        await context.Response.WriteAsJsonAsync(new { error = refused == 401 ? "Researcher credential required." : "Request not allowed from this host or origin." });
+        return;
+    }
+    await next();
+});
+
 // ADR-0010: invalid scenario files stop startup.
 var scenarios = ScenarioCatalog.All;
 app.Logger.LogInformation("Loaded {Count} scenario files.", scenarios.Count);

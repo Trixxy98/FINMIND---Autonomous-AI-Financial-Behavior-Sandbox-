@@ -175,7 +175,7 @@ passes the budget.
 | Gate requirement | Evidence |
 |---|---|
 | End-to-end mock run with inspectable causal trace | E2E tests on S01–S03 with chain checks |
-| Run isolation | Existing cross-run tests; E2E runs in parallel runs never share events or accounts |
+| Run isolation | Existing cross-run tests; `test_parallel_isolation.py` (added by ADR-0013 item 15; it did not exist when this row was first written) |
 | Cancellation | E2E cancel test plus ADR-0008 race test |
 | Limits | Actions (ADR-0009), wall time and tokens (this ADR), transaction cap (ADR-0002) |
 | Reproducibility | Determinism comparison of repeated runs |

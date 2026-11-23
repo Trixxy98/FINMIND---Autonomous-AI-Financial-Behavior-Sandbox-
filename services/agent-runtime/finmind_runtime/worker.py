@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -222,6 +223,17 @@ class Worker:
         return RunResult(run_id, outcome, turns, reason)
 
 
+# ADR-0013 A3: the worker holds no database or researcher credential (ADR-0009, ADR-0011).
+FORBIDDEN_SETTINGS = ("ConnectionStrings__Finmind", "FINMIND_TEST_DATABASE", "FINMIND_API_TEST_DATABASE",
+                      "POSTGRES_PASSWORD", "PGPASSWORD", "FINMIND_RESEARCHER_TOKEN")
+
+
+def forbidden_settings(environment: Dict[str, str]) -> List[str]:
+    """Names only; values are never logged."""
+    return sorted(name for name, value in environment.items()
+                  if name in FORBIDDEN_SETTINGS or re.search(r"password\s*=", value, re.IGNORECASE))
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description="FINMIND agent runtime worker")
     parser.add_argument("--once", action="store_true", help="claim one run, run it, and exit")
@@ -229,6 +241,10 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    forbidden = forbidden_settings(dict(os.environ))
+    if forbidden:
+        log.error("Refusing to start: remove %s from the worker's environment (use .env.worker).", ", ".join(forbidden))
+        return 2
     token = os.environ.get("FINMIND_WORKER_TOKEN", "")
     if len(token) < 32:
         log.error("FINMIND_WORKER_TOKEN must be set (at least 32 characters).")

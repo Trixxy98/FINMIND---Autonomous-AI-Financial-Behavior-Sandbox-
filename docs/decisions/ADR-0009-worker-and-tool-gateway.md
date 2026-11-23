@@ -236,6 +236,9 @@ Model messages and token usage are runtime events defined in ADR-0011.
   accounts, otherwise `ACCOUNT_NOT_IN_RUN`). These rejections appear in
   `TOOL_RETURNED` and the tool-call record, not as ledger `POLICY_DENIED`
   events, because the ledger is never called.
+- Amended by ADR-0013 A3: the worker refuses to start with a database,
+  researcher, or password-bearing setting in its environment, and loads only
+  `.env.worker`.
 - Amended by ADR-0013 items 16 and 17: a rejection never overwrites what
   the same `toolCallId` committed, the response returned is always the one
   recorded, and arguments or names with invalid Unicode are recorded as

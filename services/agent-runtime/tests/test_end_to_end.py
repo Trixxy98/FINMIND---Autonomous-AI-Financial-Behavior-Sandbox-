@@ -19,6 +19,7 @@ from finmind_runtime.worker import Worker
 
 API = os.environ.get("FINMIND_E2E_API_URL")
 TOKEN = os.environ.get("FINMIND_WORKER_TOKEN", "")
+RESEARCHER = os.environ.get("FINMIND_RESEARCHER_TOKEN", "")  # ADR-0013 A3: researcher routes need it
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "BUDGET_EXCEEDED"}
 IDS = re.compile(r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{64})$")
 
@@ -39,7 +40,8 @@ test_worker.__test__ = False
 
 def http(method, path, payload=None):
     data = None if payload is None else json.dumps(payload).encode()
-    request = urllib.request.Request(API + path, data=data, method=method, headers={"Content-Type": "application/json"})
+    request = urllib.request.Request(API + path, data=data, method=method,
+                                     headers={"Content-Type": "application/json", "Authorization": "Bearer " + RESEARCHER})
     with urllib.request.urlopen(request, timeout=10) as response:
         raw = response.read()
         return json.loads(raw) if raw else None
