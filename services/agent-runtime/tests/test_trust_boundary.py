@@ -21,7 +21,9 @@ LOCAL = "127.0.0.1:5080"
 RUN = str(uuid.uuid4())
 READS = ["/internal/scenarios", f"/internal/runs/{RUN}", f"/internal/runs/{RUN}/events",
          f"/internal/runs/{RUN}/events/verify", f"/internal/runs/{RUN}/environment",
-         f"/internal/runs/{RUN}/accounts/{RUN}/balance", f"/internal/runs/{RUN}/obligations/{RUN}"]
+         f"/internal/runs/{RUN}/accounts/{RUN}/balance", f"/internal/runs/{RUN}/obligations/{RUN}",
+         "/api/v1/runs", f"/api/v1/runs/{RUN}", f"/api/v1/runs/{RUN}/wallets", f"/api/v1/runs/{RUN}/ledger",
+         f"/api/v1/runs/{RUN}/actions", f"/api/v1/runs/{RUN}/events", "/api/v1/scenarios", "/api/v1/models"]
 WRITES = ["/internal/runs", f"/internal/runs/{RUN}/start", f"/internal/runs/{RUN}/cancel", f"/internal/runs/{RUN}/funding",
           f"/internal/runs/{RUN}/accounts", f"/internal/runs/{RUN}/transfers", f"/internal/runs/{RUN}/savings",
           f"/internal/runs/{RUN}/bill-payments", f"/internal/runs/{RUN}/obligations",

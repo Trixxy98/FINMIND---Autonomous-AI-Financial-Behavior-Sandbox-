@@ -9,6 +9,7 @@ var connectionString = builder.Configuration.GetConnectionString("Finmind")
     ?? throw new InvalidOperationException("Configure ConnectionStrings:Finmind before starting the API.");
 builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
 builder.Services.AddSingleton<PostgresLedger>();
+builder.Services.AddSingleton<ResearchReads>();
 builder.Services.AddSingleton(sp => new ToolGateway(sp.GetRequiredService<PostgresLedger>(), TimeProvider.System));
 var app = builder.Build();
 
@@ -226,6 +227,50 @@ app.MapGet("/internal/runs/{runId:guid}/events", (Guid runId, long? afterSequenc
             nextAfterSequence = events.Count > 0 ? events[^1].Sequence : after
         });
     }, isRead: true));
+
+// ADR-0013 part B: researcher read API. The request guard has already checked the researcher credential.
+var research = app.MapGroup("/api/v1");
+IResult NotFound() => Results.Json(LedgerHttpResponses.ForError(LedgerReasonCode.RunNotFound, "Run does not exist.").Body, statusCode: 404);
+IResult Invalid(string field) => Results.BadRequest(new { error = $"Invalid {field}." });
+int Limit(int? limit) => Math.Clamp(limit ?? ResearchReads.DefaultLimit, 1, ResearchReads.MaxLimit);
+
+research.MapGet("/runs", (string? status, string? kind, int? limit, Guid? before, ResearchReads reads) =>
+{
+    if (status is not null && !ResearchReads.Statuses.Contains(status)) return Invalid("status");
+    bool? managed = kind switch { null => null, "managed" => true, "legacy" => false, _ => (bool?)false };
+    if (kind is not (null or "managed" or "legacy")) return Invalid("kind");
+    return Execute(() => Results.Ok(reads.ListRuns(status, managed, Limit(limit), before)), isRead: true);
+});
+research.MapGet("/runs/{runId:guid}", (Guid runId, ResearchReads reads) =>
+    Execute(() => reads.GetRun(runId) is { } run ? Results.Ok(run) : NotFound(), isRead: true));
+research.MapGet("/runs/{runId:guid}/wallets", (Guid runId, ResearchReads reads) =>
+    Execute(() => reads.Wallets(runId) is { } wallets ? Results.Ok(wallets) : NotFound(), isRead: true));
+research.MapGet("/runs/{runId:guid}/ledger", (Guid runId, long? afterSequence, int? limit, ResearchReads reads) =>
+    Execute(() => reads.Ledger(runId, Math.Max(afterSequence ?? 0, 0), Limit(limit)) is { } ledger ? Results.Ok(ledger) : NotFound(), isRead: true));
+research.MapGet("/runs/{runId:guid}/actions", (Guid runId, long? afterSequence, int? limit, ResearchReads reads) =>
+    Execute(() => reads.ListActions(runId, Math.Max(afterSequence ?? 0, 0), Limit(limit)) is { } actions ? Results.Ok(actions) : NotFound(), isRead: true));
+research.MapGet("/runs/{runId:guid}/events", (Guid runId, long? afterSequence, int? limit, ResearchReads reads, PostgresLedger ledger) =>
+    Execute(() =>
+    {
+        if (!reads.RunExists(runId)) return NotFound();
+        var after = Math.Max(afterSequence ?? 0, 0);
+        var events = ledger.GetEvents(runId, after, Limit(limit));
+        return Results.Ok(new { runId, events, nextAfterSequence = events.Count > 0 ? events[^1].Sequence : after });
+    }, isRead: true));
+research.MapGet("/scenarios", () => Results.Ok(new
+{
+    scenarios = ScenarioCatalog.All.Values.OrderBy(s => s.Id, StringComparer.Ordinal).ThenBy(s => s.Version).Select(s => new
+    {
+        s.Id, s.Version, versionLabel = s.VersionLabel, s.Title, s.RecommendedObjective, fileHash = s.FileHash,
+        latest = ScenarioCatalog.Latest(s.Id)!.Version == s.Version
+    })
+}));
+research.MapGet("/models", () => Results.Ok(new
+{
+    pricingVersion = PricingCatalog.Version,
+    models = RunCatalogs.Models.OrderBy(p => p.Key, StringComparer.Ordinal)
+        .SelectMany(p => p.Value.Order(StringComparer.Ordinal).Select(model => new { provider = p.Key, modelId = model, paid = p.Key != "mock" }))
+}));
 
 // ADR-0009 worker interface. Routes exist only when a worker credential of at least 32 characters is configured.
 var workerToken = builder.Configuration["FINMIND_WORKER_TOKEN"];

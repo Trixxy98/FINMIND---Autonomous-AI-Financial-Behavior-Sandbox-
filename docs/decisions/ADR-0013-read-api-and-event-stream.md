@@ -1,6 +1,6 @@
 # FINMIND ADR 0013: Researcher Read API and Event Stream
 
-- Status: Part A accepted (implemented; part B proposed); Part B proposed
+- Status: Part A accepted (implemented); part B accepted: B1 (read API) implemented, B2 (event stream) pending; Part B proposed
 - Date: 22 November 2026
 - Scope: prerequisite corrections to Phase 2, then the read API and SSE stream for the Phase 3 UI
 
@@ -166,6 +166,34 @@ All routes are under `/api/v1` and require the researcher credential.
   `reported_by_agent`, or `verified_by_ledger`. Gateway denials and ledger
   denials both map to `denied`, counted once per `toolCallId`.
 - Unmanaged runs are marked `researchEligible: false`.
+
+### Contract details (B1, decided 23 November 2026)
+
+- `evidence` on an action is the strongest fact established for that
+  `toolCallId`, one label per action:
+  - `committed`: a `LEDGER_COMMITTED` event carries this `toolCallId`. The
+    tool-call outcome is not used, because an interrupted call can commit
+    without one (item 16).
+  - `denied`: no commit, and the outcome is `denied`, `malformed`,
+    `conflict`, or `unsupported_capability`, from the gateway or the ledger.
+  - `reported_by_agent`: `submit_plan`, `finish`, or `request_funding` with
+    outcome `ok`. The agent's statement is recorded, not verified.
+  - `proposed`: everything else: reads, `wait`, a replay of a key another
+    call committed, an internal error, or no outcome yet.
+- Wallet balances and journals carry `verified_by_ledger`: they are sums of
+  postings. Wallets also carry the same balances replayed from
+  `LEDGER_COMMITTED` events up to `asOfSequence`, and `reconciled` says
+  whether the two agree.
+- Run detail includes action counts by evidence, with the total as the
+  denominator.
+- Lists are ordered by event sequence, so a write that commits late cannot
+  slip behind a cursor: actions by their `TOOL_CALL_PROPOSED` sequence,
+  journals by their `LEDGER_COMMITTED` sequence. Journals of runs created
+  before the event log (ADR-0007) have no such event; they come in the
+  first page, in creation order.
+- An action without an outcome yet has `complete: false` and can change;
+  read it again or follow the stream.
+- Runs are listed newest first, paged with `before` (a run ID).
 
 ### Event stream
 
