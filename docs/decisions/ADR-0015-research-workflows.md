@@ -1,6 +1,6 @@
 # FINMIND ADR 0015: Research Workflows (Phase 4)
 
-- Status: Accepted 24 November 2026 (step 1 implemented)
+- Status: Accepted 24 November 2026 (steps 1 and 2 implemented)
 - Date: 24 November 2026
 - Scope: versioned metrics, replicated batches and comparison, rule-based
   classification with human review, export, read-only replay, and further
@@ -115,6 +115,22 @@ writes. It reconstructs what was recorded and does not rerun a model.
 - Each needs its own decision later: S08 (needs a way to make a large
   loss), S10 (needs the `bounded_summary` memory design from ADR-0012), and
   S11 (needs fault injection after commit, a new test-only capability).
+
+#### Step 2 as implemented (migration 015)
+
+- `POST /api/v1/batches` takes `config`, `count` (1 to 20), optional
+  `seeds` (one per run), `label`, and `start`. Every configuration is
+  validated before anything is stored. Runs are created in positions 0 to
+  N-1 and started in the order given by `orderSeed` (xoshiro256**, as for
+  scenarios), which is stored with the batch.
+- Batch rows are append-only; a run's batch and position cannot change.
+- `GET /api/v1/compare?batch=...&batch=...` takes 2 to 6 batches. It
+  compares the runs of each batch, so ad hoc groups of runs wait for a
+  later step. Runs not finished, cancelled, or failed for a platform reason
+  (`runtime:` or an expired session) are listed as excluded. A model
+  refusal and unrepresentable output stay in, as observations.
+- Integer metrics have an exact decimal mean rounded half to even; rates
+  report how many runs had no applicable value.
 
 ## Delivery
 

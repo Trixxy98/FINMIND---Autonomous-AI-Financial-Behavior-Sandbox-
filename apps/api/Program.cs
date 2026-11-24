@@ -10,6 +10,7 @@ var connectionString = builder.Configuration.GetConnectionString("Finmind")
 builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
 builder.Services.AddSingleton<PostgresLedger>();
 builder.Services.AddSingleton<ResearchReads>();
+builder.Services.AddSingleton<BatchStore>();
 builder.Services.AddSingleton(sp => new ToolGateway(sp.GetRequiredService<PostgresLedger>(), TimeProvider.System));
 var app = builder.Build();
 
@@ -289,6 +290,109 @@ research.MapGet("/runs/{runId:guid}/stream", async (Guid runId, string? afterSeq
     await EventStream.Run(context, runId, cursor, ledger, reads);
     return Results.Empty;
 });
+
+// ADR-0015 step 2: batches of replications, and their comparison.
+research.MapPost("/batches", (JsonObject? body, PostgresLedger ledger, BatchStore batches) => Execute(() =>
+{
+    var fields = new List<string>();
+    if (body is null) return Results.BadRequest(new { error = "Body must be JSON.", fields = new[] { "body" } });
+    fields.AddRange(body.Select(p => p.Key).Where(k => k is not ("config" or "count" or "seeds" or "label" or "start")));
+    var config = body["config"] as JsonObject;
+    if (config is null) fields.Add("config");
+    int count = ToolDefinition.TryGetInteger(body["count"], out var n) && n is >= 1 and <= 20 ? (int)n : 0;
+    if (count == 0) fields.Add("count");
+    long[]? seeds = null;
+    if (body.ContainsKey("seeds"))
+    {
+        seeds = body["seeds"] is JsonArray list && list.All(s => ToolDefinition.TryGetInteger(s, out var v) && v is >= 0 and <= int.MaxValue)
+            ? list.Select(s => { ToolDefinition.TryGetInteger(s, out var v); return v; }).ToArray() : null;
+        if (seeds is null || seeds.Length != count) fields.Add("seeds");
+    }
+    var label = body["label"] is JsonValue text && text.TryGetValue<string>(out var given) ? given.Trim() : null;
+    if (body.ContainsKey("label") && (label is null || label.Length is 0 or > 200)) fields.Add("label");
+    var start = body["start"] is JsonValue flag && flag.TryGetValue<bool>(out var s) && s;
+    if (fields.Count > 0) return Results.BadRequest(new { error = "Invalid batch request.", fields = fields.Distinct() });
+
+    // Every configuration is validated before anything is stored, so a bad request creates nothing.
+    JsonObject Variant(int index)
+    {
+        var variant = (JsonObject)config!.DeepClone();
+        if (seeds is not null) variant["seed"] = seeds[index];
+        return variant;
+    }
+    for (var i = 0; i < count; i++) RunConfiguration.Validate(Variant(i), codeRevision);
+
+    var orderSeed = (long)System.Security.Cryptography.RandomNumberGenerator.GetInt32(int.MaxValue);
+    var order = Comparison.StartOrder(count, orderSeed);
+    var batchId = batches.Insert(label, config!, count, seeds is null ? "same" : "list", orderSeed, order, seeds);
+    var created = Enumerable.Range(0, count).Select(i => ledger.CreateManagedRun(Variant(i), codeRevision, batchId, i).RunId).ToArray();
+    var inStartOrder = order.Select(position => created[position]).ToArray();
+    if (start) foreach (var runId in inStartOrder) ledger.TransitionRun(runId, RunStatus.Queued, null, FinanceEvents.InternalApiSource);
+    return Results.Created($"/api/v1/batches/{batchId}", new { batchId, runIds = inStartOrder, orderSeed, startOrder = order, started = start });
+}));
+research.MapGet("/batches", (int? limit, BatchStore batches) =>
+    Execute(() => Results.Ok(batches.List(Limit(limit))), isRead: true));
+research.MapGet("/batches/{batchId:guid}", (Guid batchId, BatchStore batches) =>
+    Execute(() => batches.Get(batchId) is { } batch ? Results.Ok(batch)
+        : Results.Json(new { status = "denied", reasonCode = "BATCH_NOT_FOUND", message = "Batch does not exist." }, statusCode: 404), isRead: true));
+
+research.MapGet("/compare", (HttpRequest request, BatchStore batches, ResearchReads reads) => Execute(() =>
+{
+    var ids = request.Query["batch"].Select(v => Guid.TryParse(v, out var id) ? id : Guid.Empty).ToList();
+    if (ids.Count is < 2 or > 6 || ids.Contains(Guid.Empty) || ids.Distinct().Count() != ids.Count)
+        return Results.BadRequest(new { error = "Give 2 to 6 distinct batch IDs as batch=..." });
+    var groups = new List<(JsonObject Batch, List<JsonObject> Snapshots, List<JsonObject> Included, JsonArray Excluded)>();
+    foreach (var id in ids)
+    {
+        if (batches.Get(id) is not { } batch)
+            return Results.Json(new { status = "denied", reasonCode = "BATCH_NOT_FOUND", message = $"Batch {id} does not exist." }, statusCode: 404);
+        var snapshots = new List<JsonObject>();
+        var included = new List<JsonObject>();
+        var excluded = new JsonArray();
+        foreach (var entry in batch["runs"]!.AsArray())
+        {
+            var runId = entry!["runId"]!.GetValue<Guid>();
+            var run = reads.GetRun(runId)!;
+            snapshots.Add(run["configSnapshot"]!.AsObject());
+            if (Comparison.ExclusionReason((bool)run["researchEligible"]!, (string?)run["status"], (string?)run["statusReason"]) is { } reason)
+                excluded.Add(new JsonObject { ["runId"] = runId, ["reason"] = reason, ["statusReason"] = run["statusReason"]?.DeepClone() });
+            else included.Add(reads.Metrics(runId)!);
+        }
+        groups.Add((batch, snapshots, included, excluded));
+    }
+
+    var metrics = new JsonArray();
+    foreach (var (name, path, unit) in Comparison.Metrics)
+    {
+        var perGroup = new JsonArray();
+        foreach (var group in groups)
+        {
+            var values = group.Included.Select(m => (RunId: m["runId"]!.GetValue<Guid>(), Value: Comparison.Read(m, path))).ToList();
+            var summary = unit is { } u
+                ? Comparison.Summarize(values.Select(v => ToolDefinition.TryGetInteger(v.Value, out var x) ? x
+                    : throw new InvalidOperationException($"{name} is not an integer.")).ToList(), u)
+                : Comparison.SummarizeRates(values.Select(v => v.Value is JsonValue x ? x.GetValue<double>() : (double?)null).ToList());
+            summary["batchId"] = group.Batch["batchId"]!.DeepClone();
+            summary["values"] = new JsonArray(values.Select(v => (JsonNode)new JsonObject { ["runId"] = v.RunId, ["value"] = v.Value?.DeepClone() }).ToArray());
+            perGroup.Add(summary);
+        }
+        metrics.Add(new JsonObject { ["name"] = name, ["groups"] = perGroup });
+    }
+    return Results.Ok(new JsonObject
+    {
+        ["comparisonVersion"] = Comparison.Version,
+        ["metricsVersion"] = MetricsV1.Version,
+        ["note"] = "Descriptive only. No p-values; an interval only from n >= 5. One configuration and seed per group unless a seed list was used.",
+        ["groups"] = new JsonArray(groups.Select(g => (JsonNode)new JsonObject
+        {
+            ["batchId"] = g.Batch["batchId"]!.DeepClone(), ["label"] = g.Batch["label"]?.DeepClone(),
+            ["n"] = g.Included.Count, ["included"] = new JsonArray(g.Included.Select(m => m["runId"]!.DeepClone()).ToArray()),
+            ["excluded"] = g.Excluded
+        }).ToArray()),
+        ["configuration"] = Comparison.Differences(groups.Select(g => (IReadOnlyList<JsonObject>)g.Snapshots).ToList()),
+        ["metrics"] = metrics
+    });
+}, isRead: true));
 
 research.MapGet("/scenarios", () => Results.Ok(new
 {

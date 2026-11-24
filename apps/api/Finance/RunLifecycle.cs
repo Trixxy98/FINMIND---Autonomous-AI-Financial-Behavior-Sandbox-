@@ -9,7 +9,8 @@ public enum RunStatus { Draft, Queued, Initializing, Running, Completed, Failed,
 
 public sealed record RunInfo(
     Guid RunId, bool Managed, string? Status, string? StatusReason, JsonObject? ConfigSnapshot, string? ConfigHash,
-    DateTimeOffset? QueuedAt, DateTimeOffset? StartedAt, DateTimeOffset? FinishedAt);
+    DateTimeOffset? QueuedAt, DateTimeOffset? StartedAt, DateTimeOffset? FinishedAt,
+    Guid? BatchId = null, int? BatchPosition = null); // ADR-0015: set at creation, never changed
 
 public sealed class RunConfigException(IReadOnlyList<string> fields)
     : LedgerException(LedgerReasonCode.InvalidRunConfig, "Run configuration is invalid.")

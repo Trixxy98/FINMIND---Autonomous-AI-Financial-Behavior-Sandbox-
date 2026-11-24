@@ -470,7 +470,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
     }
 
     // ADR-0008: create a managed run in DRAFT from a validated, immutable snapshot.
-    public RunInfo CreateManagedRun(JsonObject? config, string? codeRevision)
+    public RunInfo CreateManagedRun(JsonObject? config, string? codeRevision, Guid? batchId = null, int? batchPosition = null)
     {
         var runId = Guid.NewGuid();
         Record(FinanceEvents.Operations.CreateRun, runId, new JsonObject(), FinanceEvents.InternalApiSource, () =>
@@ -479,8 +479,10 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             using var connection = dataSource.OpenConnection();
             using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
             using var insert = new NpgsqlCommand(
-                "INSERT INTO experiment_runs (id, transaction_limit_sen, status, config_snapshot) " +
-                "VALUES (@id, @limit, 'DRAFT', @snapshot) RETURNING encode(config_hash, 'hex')", connection, transaction);
+                "INSERT INTO experiment_runs (id, transaction_limit_sen, status, config_snapshot, batch_id, batch_position) " +
+                "VALUES (@id, @limit, 'DRAFT', @snapshot, @batch, @position) RETURNING encode(config_hash, 'hex')", connection, transaction);
+            insert.Parameters.AddWithValue("batch", NpgsqlDbType.Uuid, (object?)batchId ?? DBNull.Value);
+            insert.Parameters.AddWithValue("position", NpgsqlDbType.Integer, (object?)batchPosition ?? DBNull.Value);
             insert.Parameters.AddWithValue("id", runId);
             insert.Parameters.AddWithValue("limit", RunConfiguration.TransactionLimit(snapshot));
             insert.Parameters.AddWithValue("snapshot", NpgsqlDbType.Jsonb, snapshot.ToJsonString());
@@ -496,15 +498,15 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
     {
         using var connection = dataSource.OpenConnection();
         using var command = new NpgsqlCommand(
-            "SELECT status, status_reason, config_snapshot::text, encode(config_hash, 'hex'), queued_at, started_at, finished_at " +
-            "FROM experiment_runs WHERE id = @id", connection);
+            "SELECT status, status_reason, config_snapshot::text, encode(config_hash, 'hex'), queued_at, started_at, finished_at, " +
+            "batch_id, batch_position FROM experiment_runs WHERE id = @id", connection);
         command.Parameters.AddWithValue("id", runId);
         using var reader = command.ExecuteReader();
         if (!reader.Read()) throw new LedgerValidationException(LedgerReasonCode.RunNotFound, "Run does not exist.");
         DateTimeOffset? Time(int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
         return new RunInfo(runId, !reader.IsDBNull(0), NullableString(reader, 0), NullableString(reader, 1),
             reader.IsDBNull(2) ? null : JsonNode.Parse(reader.GetString(2))!.AsObject(), NullableString(reader, 3),
-            Time(4), Time(5), Time(6));
+            Time(4), Time(5), Time(6), reader.IsDBNull(7) ? null : reader.GetGuid(7), reader.IsDBNull(8) ? null : reader.GetInt32(8));
     }
 
     // Lifecycle transitions other than activation. Rejected transitions are recorded as POLICY_DENIED.

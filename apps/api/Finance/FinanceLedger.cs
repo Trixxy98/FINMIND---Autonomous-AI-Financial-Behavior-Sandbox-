@@ -38,7 +38,7 @@ public interface IFinanceLedger
     long GetBalance(Guid runId, Guid accountId);
     IReadOnlyList<LedgerJournal> GetJournals(Guid runId);
     IReadOnlyList<RunEvent> GetEvents(Guid runId, long afterSequence, int limit);
-    RunInfo CreateManagedRun(JsonObject? config, string? codeRevision);
+    RunInfo CreateManagedRun(JsonObject? config, string? codeRevision, Guid? batchId = null, int? batchPosition = null);
     RunInfo GetRun(Guid runId);
     RunInfo TransitionRun(Guid runId, RunStatus to, string? reason, string source);
     OpenRunResult ActivateRun(Guid runId, string source);
@@ -226,6 +226,8 @@ public sealed class InMemoryLedger : IFinanceLedger
         public long TokensUsed;
         public long CostMicroUsd;
         public long ReservedMicroUsd;
+        public Guid? BatchId;
+        public int? BatchPosition;
     }
 
     private sealed class ScheduledEvent(MaterializedScenarioEvent evt)
@@ -718,13 +720,13 @@ public sealed class InMemoryLedger : IFinanceLedger
         }
     }
 
-    public RunInfo CreateManagedRun(JsonObject? config, string? codeRevision)
+    public RunInfo CreateManagedRun(JsonObject? config, string? codeRevision, Guid? batchId = null, int? batchPosition = null)
     {
         var runId = Guid.NewGuid();
         Record(FinanceEvents.Operations.CreateRun, runId, new JsonObject(), FinanceEvents.InternalApiSource, () =>
         {
             var snapshot = RunConfiguration.Validate(config, codeRevision);
-            var run = new ManagedRun(snapshot, RunConfiguration.InMemoryHash(snapshot));
+            var run = new ManagedRun(snapshot, RunConfiguration.InMemoryHash(snapshot)) { BatchId = batchId, BatchPosition = batchPosition };
             _managedRuns.Add(runId, run);
             _runTransactionLimits[runId] = RunConfiguration.TransactionLimit(snapshot);
             Emit(FinanceEvents.ManagedRunCreated(snapshot, run.Hash));
@@ -739,7 +741,7 @@ public sealed class InMemoryLedger : IFinanceLedger
         {
             if (_managedRuns.TryGetValue(runId, out var run))
                 return new RunInfo(runId, true, RunLifecycle.Wire(run.Status), run.Reason, (JsonObject)run.Snapshot.DeepClone(),
-                    run.Hash, run.QueuedAt, run.StartedAt, run.FinishedAt);
+                    run.Hash, run.QueuedAt, run.StartedAt, run.FinishedAt, run.BatchId, run.BatchPosition);
             if (_runTransactionLimits.ContainsKey(runId))
                 return new RunInfo(runId, false, null, null, null, null, null, null, null);
             throw new LedgerValidationException(LedgerReasonCode.RunNotFound, "Run does not exist.");

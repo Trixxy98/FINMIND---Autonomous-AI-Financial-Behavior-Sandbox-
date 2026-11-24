@@ -1,6 +1,8 @@
 """ADR-0013 A1 regression tests: cost cap, sessions, and worker crash containment. No paid calls."""
 
 import contextlib
+import io
+import logging
 import hashlib
 import json
 import os
@@ -191,8 +193,14 @@ class ContainmentTests(unittest.TestCase):
         for error, code in ((Unreachable(), 1), (ApiError(404, None), 1), (SessionEnded(), 2)):
             with self.subTest(error=repr(error)), mock.patch.dict(os.environ, {"FINMIND_WORKER_TOKEN": "x" * 32}, clear=True), \
                     mock.patch.object(worker, "Client", lambda *args: FakeApi(claim_error=error)), \
-                    contextlib.redirect_stderr(None):
-                self.assertEqual(worker.main(["--once"]), code)
+                    contextlib.redirect_stderr(io.StringIO()):
+                root = logging.getLogger()
+                handlers = list(root.handlers)
+                try:
+                    self.assertEqual(worker.main(["--once"]), code)
+                finally:
+                    # main() configures logging for the process; give later tests the handlers they had.
+                    root.handlers[:] = handlers
 
     def test_oversized_calls_are_sent_as_recordable_malformed_attempts(self):
         sent = []
