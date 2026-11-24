@@ -264,6 +264,8 @@ research.MapGet("/runs/{runId:guid}/verify", (Guid runId, ResearchReads reads, P
 
 research.MapGet("/runs/{runId:guid}", (Guid runId, ResearchReads reads) =>
     Execute(() => reads.GetRun(runId) is { } run ? Results.Ok(run) : NotFound(), isRead: true));
+research.MapGet("/runs/{runId:guid}/metrics", (Guid runId, ResearchReads reads) =>
+    Execute(() => reads.Metrics(runId) is { } metrics ? Results.Ok(metrics) : NotFound(), isRead: true));
 research.MapGet("/runs/{runId:guid}/wallets", (Guid runId, ResearchReads reads) =>
     Execute(() => reads.Wallets(runId) is { } wallets ? Results.Ok(wallets) : NotFound(), isRead: true));
 research.MapGet("/runs/{runId:guid}/ledger", (Guid runId, long? afterSequence, int? limit, ResearchReads reads) =>

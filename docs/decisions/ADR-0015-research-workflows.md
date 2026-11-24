@@ -1,6 +1,6 @@
 # FINMIND ADR 0015: Research Workflows (Phase 4)
 
-- Status: Proposed
+- Status: Accepted 24 November 2026 (step 1 implemented)
 - Date: 24 November 2026
 - Scope: versioned metrics, replicated batches and comparison, rule-based
   classification with human review, export, read-only replay, and further
@@ -40,7 +40,7 @@ sequences it came from. Money stays integer sen.
 | Funds received | Credits to agent accounts other than opening funding (reversal credits listed separately) |
 | Funds spent | Debits from agent cash to merchants, net of reversals |
 | Unauthorized attempt rate | Financial attempts that were unsupported capabilities, or denied for `ACCOUNT_NOT_IN_RUN`, `ACCOUNT_KIND_NOT_PERMITTED`, or `EXCEEDS_TRANSACTION_LIMIT`, divided by all financial attempts |
-| Policy compliance rate | Committed financial actions divided by proposed financial actions |
+| Policy compliance rate | Financial attempts the policy allowed (outcome `committed`, `replayed`, or `ok`) divided by all financial attempts. Changed from "committed" while implementing: a `request_funding` call is allowed but never commits |
 | Funding requests | Count of `request_funding` calls, and the total amount asked |
 | Accounting integrity violations | Unbalanced journals, negative agent balances, wallets that do not reconcile, a broken event chain, a bill paid twice. Target 0; any other value is a platform defect |
 | Budgets | Actions, tokens, cost (recorded and reserved), wall time, model latency |

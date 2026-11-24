@@ -152,8 +152,10 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
     }
 
     public JsonObject? Wallets(Guid runId) => Read((connection, transaction) =>
+        Exists(connection, transaction, runId) ? WalletsIn(connection, transaction, runId) : null);
+
+    private static JsonObject WalletsIn(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
     {
-        if (!Exists(connection, transaction, runId)) return null;
         var fromEvents = new Dictionary<Guid, long>();
         using (var command = Command(connection, transaction,
             "SELECT (p->>'accountId')::uuid, sum((p->>'amountSen')::bigint)::bigint FROM run_events e, " +
@@ -192,6 +194,76 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
             ["runId"] = runId, ["asOfSequence"] = AsOfSequence(connection, transaction, runId),
             ["reconciled"] = reconciled, ["accounts"] = accounts
         };
+    }
+
+    // ADR-0015: finmind-metrics/v1, from the same snapshot as everything it is derived from.
+    public JsonObject? Metrics(Guid runId) => Read((connection, transaction) =>
+    {
+        JsonObject? snapshot;
+        long tokens, cost, reserved, elapsed;
+        bool managed;
+        using (var command = Command(connection, transaction,
+            "SELECT config_snapshot::text, model_tokens_used, model_cost_micro_usd, model_cost_reserved_micro_usd, " +
+            "extract(epoch FROM coalesce(finished_at, now()) - started_at)::bigint, status IS NOT NULL FROM experiment_runs WHERE id = @id",
+            ("id", runId)))
+        using (var reader = command.ExecuteReader())
+        {
+            if (!reader.Read()) return null;
+            snapshot = reader.IsDBNull(0) ? null : JsonNode.Parse(reader.GetString(0))!.AsObject();
+            (tokens, cost, reserved) = (reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3));
+            elapsed = reader.IsDBNull(4) ? 0 : reader.GetInt64(4);
+            managed = reader.GetBoolean(5);
+        }
+
+        var kinds = new Dictionary<Guid, string>();
+        using (var command = Command(connection, transaction, "SELECT id, kind FROM accounts WHERE run_id = @id", ("id", runId)))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) kinds[reader.GetGuid(0)] = reader.GetString(1);
+
+        var journals = new Dictionary<Guid, (string Kind, long? Sequence, Guid? Reverses, Guid? Obligation, List<MetricPosting> Postings)>();
+        using (var command = Command(connection, transaction,
+            "SELECT j.id, j.kind, (SELECT min(e.sequence) FROM run_events e WHERE e.run_id = j.run_id " +
+            "AND e.event_type = 'LEDGER_COMMITTED' AND e.journal_id = j.id), j.reverses_entry_id, j.obligation_id " +
+            "FROM journal_entries j WHERE j.run_id = @id", ("id", runId)))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read())
+                journals[reader.GetGuid(0)] = (reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                    reader.IsDBNull(3) ? null : reader.GetGuid(3), reader.IsDBNull(4) ? null : reader.GetGuid(4), []);
+        using (var command = Command(connection, transaction,
+            "SELECT entry_id, account_id, signed_amount_sen FROM journal_postings WHERE run_id = @id ORDER BY id", ("id", runId)))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) journals[reader.GetGuid(0)].Postings.Add(new MetricPosting(reader.GetGuid(1), reader.GetInt64(2)));
+
+        int turns;
+        long latency;
+        using (var command = Command(connection, transaction,
+            "SELECT count(*)::int, coalesce(sum((payload->>'latencyMs')::bigint), 0)::bigint FROM run_events " +
+            "WHERE run_id = @id AND event_type = 'MODEL_INVOCATION_COMPLETED'", ("id", runId)))
+        using (var reader = command.ExecuteReader())
+        {
+            reader.Read();
+            (turns, latency) = (reader.GetInt32(0), reader.GetInt64(1));
+        }
+        bool chainIntact;
+        using (var command = Command(connection, transaction, "SELECT finmind_verify_run_events(@id) IS NULL", ("id", runId)))
+            chainIntact = command.ExecuteScalar() is true;
+
+        var actions = Actions(connection, transaction, runId, 0, int.MaxValue).Select(a => new MetricAction(
+            (string)a["toolCallId"]!, (string)a["tool"]!, (string?)a["outcome"], (string?)a["reasonCode"], a["arguments"],
+            (long)a["proposedSequence"]!)).ToList();
+        var opening = journals.Values.FirstOrDefault(j => j.Kind == "opening_funding").Postings?.Where(p => p.AmountSen > 0).Sum(p => p.AmountSen) ?? 0;
+        long? Number(string key) => snapshot?[key] is JsonValue value && value.TryGetValue<long>(out var n) ? n : null;
+
+        var input = new MetricInput(
+            Number("startingBalanceSen") ?? opening, kinds,
+            journals.Select(j => new MetricJournal(j.Key, j.Value.Kind, j.Value.Sequence, j.Value.Reverses, j.Value.Obligation, j.Value.Postings)).ToList(),
+            actions, turns, latency, (int?)Number("maxActions"), tokens, Number("maxModelTokens"), cost, reserved, Number("maxCostMicroUsd"),
+            elapsed, Number("maxWallTimeSeconds"), (bool)WalletsIn(connection, transaction, runId)["reconciled"]!, chainIntact,
+            AsOfSequence(connection, transaction, runId));
+        var metrics = MetricsV1.Compute(input);
+        metrics["runId"] = runId;
+        metrics["researchEligible"] = managed;
+        return metrics;
     });
 
     // Ordered by the LEDGER_COMMITTED sequence; journals from before the event log come first.
