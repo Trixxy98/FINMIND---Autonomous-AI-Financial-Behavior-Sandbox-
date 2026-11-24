@@ -44,6 +44,9 @@ class MetricsApiTests(unittest.TestCase):
         second = create_and_start(scenario="S01", seed=8)
         run_until_terminal(second)
         a, b = get(f"/runs/{first}/metrics"), get(f"/runs/{second}/metrics")
+        # Wall time measures the machine, not the agent, so it is the one value allowed to differ.
+        for metrics in (a, b):
+            del metrics["metrics"]["budgets"]["wallTimeSeconds"]["elapsed"]
         self.assertEqual(a["metrics"], b["metrics"])
 
     def test_unknown_run_and_development_run(self):

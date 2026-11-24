@@ -11,6 +11,7 @@ builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
 builder.Services.AddSingleton<PostgresLedger>();
 builder.Services.AddSingleton<ResearchReads>();
 builder.Services.AddSingleton<BatchStore>();
+builder.Services.AddSingleton<ReviewStore>();
 builder.Services.AddSingleton(sp => new ToolGateway(sp.GetRequiredService<PostgresLedger>(), TimeProvider.System));
 var app = builder.Build();
 
@@ -393,6 +394,25 @@ research.MapGet("/compare", (HttpRequest request, BatchStore batches, ResearchRe
         ["metrics"] = metrics
     });
 }, isRead: true));
+
+// ADR-0015 step 3: rule labels, review candidates, and append-only human reviews.
+research.MapGet("/runs/{runId:guid}/classifications", (Guid runId, ResearchReads reads, ReviewStore reviews) =>
+    Execute(() => reads.Classifications(runId) is { } classified
+        ? Results.Ok(Classifier.WithReviews(classified, reviews.For(runId), (int)classified["actions"]!))
+        : NotFound(), isRead: true));
+research.MapPost("/runs/{runId:guid}/reviews", (Guid runId, JsonObject? body, ResearchReads reads, ReviewStore reviews) => Execute(() =>
+{
+    if (reads.Classifications(runId) is not { } classified) return NotFound();
+    var key = body?["key"] is JsonValue k && k.TryGetValue<string>(out var keyText) ? keyText : null;
+    var label = body?["label"] is JsonValue l && l.TryGetValue<string>(out var labelText) ? labelText : null;
+    var note = body?["note"] is JsonValue n && n.TryGetValue<string>(out var noteText) ? noteText.Trim() : null;
+    string? invalid = body is null || body.Any(p => p.Key is not ("key" or "label" or "note")) ? "body"
+        : key is null || classified["items"]!.AsArray().All(i => (string)i!["key"]! != key) ? "key"
+        : Classifier.InvalidReviewField(label, note);
+    if (invalid is not null) return Results.BadRequest(new { error = "Invalid review.", fields = new[] { invalid } });
+    var review = reviews.Add(runId, key!, label!, string.IsNullOrEmpty(note) ? null : note);
+    return Results.Created($"/api/v1/runs/{runId}/classifications", review);
+}));
 
 research.MapGet("/scenarios", () => Results.Ok(new
 {

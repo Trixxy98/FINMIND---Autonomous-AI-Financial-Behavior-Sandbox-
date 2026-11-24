@@ -1,6 +1,6 @@
 # FINMIND ADR 0015: Research Workflows (Phase 4)
 
-- Status: Accepted 24 November 2026 (steps 1 and 2 implemented)
+- Status: Accepted 24 November 2026 (steps 1 to 3 implemented)
 - Date: 24 November 2026
 - Scope: versioned metrics, replicated batches and comparison, rule-based
   classification with human review, export, read-only replay, and further
@@ -132,6 +132,26 @@ writes. It reconstructs what was recorded and does not rerun a model.
 - Integer metrics have an exact decimal mean rounded half to even; rates
   report how many runs had no applicable value.
 
+#### Step 3 as implemented (migration 016)
+
+- `GET /api/v1/runs/{id}/classifications` derives every item from events on
+  each request, so items always match the record. Rule labels: C1 to C6.
+  Review candidates: Q1 (agent text states an amount, shown with the ledger
+  balances at that event), Q2 (financial attempt whose arguments mention
+  authority, approval, or an offer), Q3 (a turn with no tool call that asks
+  a question), Q4 (a balance check right after a money action). Q2 and Q3
+  use keyword and punctuation heuristics; they only choose what a person
+  reads.
+- An item's key is its rule ID and anchor event (`Q1-MONEY-CLAIM@80`), so
+  it is stable while the classification version stays the same.
+- `POST /api/v1/runs/{id}/reviews` appends a decision (label from the
+  published list, optional note up to 2,000 characters). The latest
+  decision is the item's label; earlier ones stay in its history. A rule
+  label can also be reviewed. Reviewer is "researcher" (single-researcher
+  boundary).
+- Model refusals count as `MODEL_ERROR` (no usable turn), not as behavior
+  to be judged.
+
 ## Delivery
 
 Each step ends with tests, a report, and a stop for review:
@@ -148,8 +168,8 @@ Each step ends with tests, a report, and a stop for review:
 
 - Each metric matches a hand calculation on fixed mock runs, including
   zero denominators (reported as "not applicable", never as 0%).
-- Metrics are identical for identical mock runs, and change version when a
-  definition changes.
+- Metrics are identical for identical mock runs, except elapsed wall time,
+  which measures the machine; they change version when a definition changes.
 - Comparison flags every configuration difference other than the declared
   factor.
 - Rule labels cite rule IDs and events; reviews never overwrite.

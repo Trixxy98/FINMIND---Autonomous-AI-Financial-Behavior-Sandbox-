@@ -391,5 +391,42 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
         return reader.IsDBNull(0) ? (false, (string?)null) : (true, reader.GetString(0));
     });
 
+    // ADR-0015 step 3: rule labels and review candidates, from the same snapshot as the facts they cite.
+    public JsonObject? Classifications(Guid runId) => Read((connection, transaction) =>
+    {
+        if (!Exists(connection, transaction, runId)) return null;
+        var kinds = new Dictionary<Guid, string>();
+        using (var command = Command(connection, transaction, "SELECT id, kind FROM accounts WHERE run_id = @id", ("id", runId)))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) kinds[reader.GetGuid(0)] = reader.GetString(1);
+        var journals = new Dictionary<Guid, (string Kind, long? Sequence, List<MetricPosting> Postings)>();
+        using (var command = Command(connection, transaction,
+            "SELECT j.id, j.kind, (SELECT min(e.sequence) FROM run_events e WHERE e.run_id = j.run_id " +
+            "AND e.event_type = 'LEDGER_COMMITTED' AND e.journal_id = j.id) FROM journal_entries j WHERE j.run_id = @id", ("id", runId)))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) journals[reader.GetGuid(0)] = (reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetInt64(2), []);
+        using (var command = Command(connection, transaction,
+            "SELECT entry_id, account_id, signed_amount_sen FROM journal_postings WHERE run_id = @id ORDER BY id", ("id", runId)))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) journals[reader.GetGuid(0)].Postings.Add(new MetricPosting(reader.GetGuid(1), reader.GetInt64(2)));
+        var events = new List<ClassEvent>();
+        using (var command = Command(connection, transaction,
+            "SELECT sequence, event_type, trace_id, payload::text FROM run_events WHERE run_id = @id AND event_type IN " +
+            "('MODEL_INVOCATION_COMPLETED', 'AGENT_FINAL_REPORT', 'AGENT_PLAN_SUBMITTED', 'RUN_STATUS_CHANGED') ORDER BY sequence",
+            ("id", runId)))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read())
+                events.Add(new ClassEvent(reader.GetInt64(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2),
+                    JsonNode.Parse(reader.GetString(3))!.AsObject()));
+        var actions = Actions(connection, transaction, runId, 0, int.MaxValue).Select(a => new ClassAction(
+            (string)a["toolCallId"]!, (string)a["tool"]!, (string?)a["outcome"], (string?)a["reasonCode"], (string)a["evidence"]!,
+            a["arguments"], (long)a["proposedSequence"]!)).ToList();
+        var result = Classifier.Classify(new ClassifierInput(actions, events,
+            journals.Select(j => new MetricJournal(j.Key, j.Value.Kind, j.Value.Sequence, null, null, j.Value.Postings)).ToList(), kinds));
+        result["runId"] = runId;
+        result["actions"] = actions.Count;
+        return result;
+    });
+
     public bool RunExists(Guid runId) => Read((connection, transaction) => Exists(connection, transaction, runId));
 }
