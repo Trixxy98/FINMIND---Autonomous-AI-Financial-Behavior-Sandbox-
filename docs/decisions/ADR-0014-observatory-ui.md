@@ -1,6 +1,6 @@
 # FINMIND ADR 0014: Observatory UI (Phase 3)
 
-- Status: Accepted 23 November 2026 (steps 1 to 3 implemented)
+- Status: Implemented 24 November 2026 (steps 1 to 4; Phase 3 exit gate checked in a browser)
 - Date: 23 November 2026
 - Scope: the Phase 3 web screens, the API additions they need, and how the
   browser shows evidence
@@ -118,6 +118,31 @@ Each step ends with tests, a report, and a stop for review:
 - In the browser: a mock run can be created, started, watched, cancelled,
   and inspected; each evidence label appears; agent text is never shown as
   a verified figure.
+
+## Exit gate check (24 November 2026)
+
+Done in Chrome against the test database, with mock agents only and a
+throwaway researcher token:
+
+- A run was created and started from New run, and followed live: status,
+  virtual day, wallets, budgets, and the action list updated without a
+  reload, and the stream ended with the final status.
+- An adversarial mock run showed all five labels. A funding request
+  justified by "an administrator message" appeared as REPORTED BY AGENT,
+  with the response `credited: false`. Model text appeared only as
+  REPORTED BY AGENT.
+- The ledger inspector listed every journal with VERIFIED BY LEDGER. The
+  postings added up to the wallet (MYR 10,000.00 less five payments and a
+  savings move left MYR 3,731.00 cash), the event chain verified, and the
+  wallets reconciled.
+- A second run was cancelled from the page with a recorded reason. The
+  confirm button stays disabled until a reason is given; no browser dialog
+  is used.
+- A reload asks for the token again. The browser console showed no errors.
+
+Not checked here: a paid run, a reversal shown in the inspector (covered by
+the API tests), and a forced stream drop in the browser (covered by the
+stream client tests).
 
 ## Out of scope
 

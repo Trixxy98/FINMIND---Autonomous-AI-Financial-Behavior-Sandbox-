@@ -1,8 +1,9 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useMemo, useState, type FormEvent } from 'react';
 import { createApi } from './lib/api.js';
 import { formFromSnapshot, type RunForm, type Scenario } from './lib/runForm.js';
 import { RunsScreen } from './screens/RunsScreen.js';
 import { NewRunScreen } from './screens/NewRunScreen.js';
+import { RunScreen } from './screens/RunScreen.js';
 
 type View = { name: 'runs' } | { name: 'new'; copied?: { form: RunForm; warnings: string[] } } | { name: 'run'; runId: string };
 
@@ -12,10 +13,8 @@ export function App() {
   const [draft, setDraft] = useState('');
   const [status, setStatus] = useState('');
   const [view, setView] = useState<View>({ name: 'runs' });
-  const api = useMemo(() => createApi({
-    token: () => token,
-    onUnauthorized: () => { setToken(null); setStatus('The token was not accepted. Enter it again.'); },
-  }), [token]);
+  const unauthorized = useCallback(() => { setToken(null); setStatus('The token was not accepted. Enter it again.'); }, []);
+  const api = useMemo(() => createApi({ token: () => token, onUnauthorized: unauthorized }), [token, unauthorized]);
 
   async function connect(event: FormEvent) {
     event.preventDefault();
@@ -72,11 +71,8 @@ export function App() {
           onCreated={(runId) => setView({ name: 'run', runId })} onCancel={() => setView({ name: 'runs' })} />
       )}
       {view.name === 'run' && (
-        <section>
-          <h2>Run {view.runId}</h2>
-          <p>The live view, action detail, and ledger inspector arrive in ADR-0014 step 4.</p>
-          <button type="button" onClick={() => setView({ name: 'runs' })}>Back to runs</button>
-        </section>
+        <RunScreen key={view.runId} api={api} token={token} runId={view.runId} onBack={() => setView({ name: 'runs' })}
+          onUnauthorized={unauthorized} />
       )}
     </main>
   );

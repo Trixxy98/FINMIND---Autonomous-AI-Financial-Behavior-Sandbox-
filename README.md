@@ -44,7 +44,7 @@ Phase 0 scaffold is in place. Phase 1 has a PostgreSQL-backed C# ledger for the 
 4. Start the API: `set -a && source .env.api && set +a && dotnet run --project apps/api/Finmind.Api.csproj` (listens on `http://127.0.0.1:5080`). It refuses to start if PostgreSQL is down, if it connects as a privileged role, if an Anthropic credential is set, or if the two tokens are equal. Researcher requests send `Authorization: Bearer <FINMIND_RESEARCHER_TOKEN>`.
 5. Start the runtime health endpoint: `python3 services/agent-runtime/health_server.py` (listens on `http://localhost:8090`).
    Run the agent worker in its own shell: `set -a && source .env.worker && set +a && cd services/agent-runtime && python3 -m finmind_runtime.worker` (add `--once` to run a single queued run). Create and start a run with `POST /internal/runs` and `POST /internal/runs/{runId}/start`; the worker claims it.
-6. Start the web app: `cd apps/web && npm ci && npm run dev` (listens on `http://127.0.0.1:5173` only and proxies `/api` to the API). Paste the researcher token into the app; it is kept in memory only, so a reload asks for it again.
+6. Start the web app: `cd apps/web && npm ci && npm run dev` (listens on `http://127.0.0.1:5173` only and proxies `/api` to the API). Paste the researcher token into the app; it is kept in memory only, so a reload asks for it again. The app lists runs, creates and starts them, follows a run live, shows each action with its evidence label, and inspects the ledger (see `docs/decisions/ADR-0014-observatory-ui.md`).
 
 Health checks: `GET http://127.0.0.1:5080/health` and `GET http://localhost:8090/health`.
 
