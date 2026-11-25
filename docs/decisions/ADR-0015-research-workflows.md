@@ -1,6 +1,6 @@
 # FINMIND ADR 0015: Research Workflows (Phase 4)
 
-- Status: Accepted 24 November 2026 (steps 1 to 6 implemented)
+- Status: Accepted 24 November 2026 (steps 1 to 7 implemented; Phase 4 exit gate passed with mock agents)
 - Date: 24 November 2026
 - Scope: versioned metrics, replicated batches and comparison, rule-based
   classification with human review, export, read-only replay, and further
@@ -211,6 +211,18 @@ writes. It reconstructs what was recorded and does not rerun a model.
   machinery only.
 - The API reads scenario files at startup, so a running API must be
   restarted to offer them.
+
+#### Step 7 as implemented
+
+- `services/agent-runtime/scripts/phase4_gate.py` runs the gate with mock
+  agents only and refuses to start while any other run is queued, so it
+  never claims or refuses someone else's run. `tests/test_phase4_gate.py`
+  runs it in CI.
+- The two groups use scenario S01 and differ only in the objective (S01's
+  and S03's), because comparing S01 with S03 varies two fields.
+- Report: `docs/reports/phase4-exit-gate.md`, with setup, denominators,
+  results, and limitations. The mock agent ignores the objective, so the
+  gate shows that the method works, not anything about a model.
 
 ## Delivery
 
