@@ -1,6 +1,6 @@
 # FINMIND ADR 0017: Phase 5, Hardening and Publication
 
-- Status: Accepted 25 November 2026 (steps 1 to 4 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
+- Status: Accepted 25 November 2026 (steps 1 to 5 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
 - Date: 25 November 2026
 - Scope: threat model review, gap fixes, crash and concurrency checks,
   documentation, sample data, a reproducible demo, and the Phase 5 exit gate
@@ -185,6 +185,29 @@ Each step ends with tests, a report, and a stop for review:
   tests; the file was restored.
 - Not covered: transitive NuGet and pip dependencies are not locked. Locking
   them (a NuGet lock file, pip hashes) is a possible follow-up.
+
+#### Step 5 as implemented
+
+- `README.md` rewritten as a quickstart: environment files, database,
+  API, worker, web app, first mock run; Claude runs; checks; and a map of
+  the documentation.
+- `docs/ARCHITECTURE.md`: components, trust boundaries, a run step by step,
+  the tools, and where each invariant is enforced in code and in the
+  database (each row checked against the migrations).
+- `docs/RESEARCHER_GUIDE.md`: scenarios, designing a one-factor comparison,
+  evidence labels, metrics, classification and review, export, writing up,
+  and what to do when something goes wrong.
+- `docs/reports/TEMPLATE.md`: setup, versions, inclusions and exclusions,
+  raw results, human review, observations, limitations, reproduction.
+- `tests/test_docs.py`: every repository path named in the README,
+  `AGENTS.md`, and `docs/` (decision records excepted) must exist.
+- Found while writing: the old README started Compose without
+  `--env-file .env`. Compose then reads `.env` from `infra/`, not the
+  repository root, and uses its built-in placeholder password, so a new
+  developer's owner password would not match `.env.test`. The quickstart now
+  passes `--env-file .env` everywhere. An existing database is unaffected:
+  the password is set only when the volume is first created.
+- The quickstart itself is checked in a fresh clone in step 7.
 
 ## Out of scope
 
