@@ -5,9 +5,11 @@ import { streamRunEvents } from '../lib/sse.js';
 import { budgetLines, isTerminal, modelTextFor, refreshesOn } from '../lib/runView.js';
 import { EvidenceBadge } from '../components/EvidenceBadge.js';
 import { MetricsPanel } from '../components/MetricsPanel.js';
+import { ClassificationsPanel } from '../components/ClassificationsPanel.js';
+import { ReplayPanel } from '../components/ReplayPanel.js';
 
 interface Props { api: Api; token: string; runId: string; onBack: () => void; onUnauthorized: () => void }
-type Tab = 'actions' | 'ledger' | 'events' | 'metrics';
+type Tab = 'actions' | 'ledger' | 'events' | 'metrics' | 'review' | 'replay';
 
 const box = { border: '1px solid #ddd', borderRadius: 6, padding: 12, marginBottom: 12 } as const;
 const pre = { background: '#f8f9fa', padding: 8, overflowX: 'auto', fontSize: 12, maxHeight: 300, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } as const;
@@ -174,6 +176,8 @@ export function RunScreen({ api, token, runId, onBack, onUnauthorized }: Props) 
         <button type="button" aria-pressed={tab === 'ledger'} onClick={() => void openLedger()}>Ledger inspector</button>
         <button type="button" aria-pressed={tab === 'events'} onClick={() => setTab('events')}>Events ({events.length})</button>
         <button type="button" aria-pressed={tab === 'metrics'} onClick={async () => { setTab('metrics'); setMetrics(await api.metrics(runId)); }}>Metrics</button>
+        <button type="button" aria-pressed={tab === 'review'} onClick={() => setTab('review')}>Review</button>
+        <button type="button" aria-pressed={tab === 'replay'} onClick={() => setTab('replay')}>Replay</button>
         <span style={{ marginLeft: 'auto' }}>
           Export:{' '}
           {(['jsonl', 'csv'] as const).map((format) => (
@@ -250,6 +254,9 @@ export function RunScreen({ api, token, runId, onBack, onUnauthorized }: Props) 
           )}
         </div>
       )}
+
+      {tab === 'review' && <ClassificationsPanel api={api} runId={runId} />}
+      {tab === 'replay' && <ReplayPanel key={events.length} events={events} wallets={wallets} />}
 
       {tab === 'metrics' && (metrics ? <MetricsPanel metrics={metrics} /> : <p>Loading metrics…</p>)}
 

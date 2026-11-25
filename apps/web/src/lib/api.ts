@@ -61,6 +61,7 @@ export function createApi({ token, fetchImpl = (url, init) => fetch(url, init), 
     classifications: (runId: string) => request<any>('GET', `/runs/${id(runId)}/classifications`),
     review: (runId: string, key: string, label: string, note?: string) =>
       request<any>('POST', `/runs/${id(runId)}/reviews`, note ? { key, label, note } : { key, label }),
+    pendingReviews: (limit = 50) => request<any>('GET', `/reviews/pending${query({ limit })}`),
     listBatches: (limit = 100) => request<any>('GET', `/batches${query({ limit })}`),
     getBatch: (batchId: string) => request<any>('GET', `/batches/${id(batchId)}`),
     createBatch: (body: unknown) => request<any>('POST', '/batches', body),

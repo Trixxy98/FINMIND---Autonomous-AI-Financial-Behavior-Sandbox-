@@ -1,6 +1,6 @@
 # FINMIND ADR 0015: Research Workflows (Phase 4)
 
-- Status: Accepted 24 November 2026 (steps 1 to 4 and 5a implemented)
+- Status: Accepted 24 November 2026 (steps 1 to 5 implemented)
 - Date: 24 November 2026
 - Scope: versioned metrics, replicated batches and comparison, rule-based
   classification with human review, export, read-only replay, and further
@@ -181,6 +181,21 @@ writes. It reconstructs what was recorded and does not rerun a model.
 - Export buttons fetch with the Authorization header and save a blob. They
   were not pressed in the browser check, because that downloads a file; the
   client is covered by a unit test.
+
+#### Step 5b as implemented
+
+- Review screen: finished research runs that still have open candidates
+  (`GET /api/v1/reviews/pending`, newest 1 to 100 runs checked). Each
+  candidate shows its rule, the agent's text as REPORTED BY AGENT, the
+  ledger balances at that event as VERIFIED BY LEDGER, earlier decisions,
+  and a form to append a decision. The Run screen has the same panel.
+- Replay tab: the state at any event (status, virtual day, cash, savings,
+  bills, messages delivered, the action in progress, outcomes so far) is
+  rebuilt in the browser from the recorded events. At the last event it is
+  compared with the ledger wallets and says whether they match.
+- Browser check: a balance claim was decided against the ledger context
+  and stayed in the item's history; replay matched the wallets at the end
+  and gave consistent balances at day 4.
 
 ## Delivery
 

@@ -426,6 +426,33 @@ research.MapGet("/runs/{runId:guid}/export", (Guid runId, string? format, HttpCo
         : Results.Text(RunExport.PostingsCsv(records), "text/csv; charset=utf-8");
 }, isRead: true));
 
+// ADR-0015 step 5b: finished research runs that still have review candidates, newest first.
+research.MapGet("/reviews/pending", (int? limit, ResearchReads reads, ReviewStore reviews) => Execute(() =>
+{
+    var scan = Math.Clamp(limit ?? 50, 1, 100);
+    var runs = reads.ListRuns(null, true, scan, null)["runs"]!.AsArray()
+        .Where(r => r!["status"] is JsonValue s && AgentGatewayRules.IsTerminal(RunLifecycle.Parse(s.GetValue<string>()))).ToList();
+    var pending = new JsonArray();
+    foreach (var run in runs)
+    {
+        var runId = run!["runId"]!.GetValue<Guid>();
+        var classified = reads.Classifications(runId)!;
+        var counts = Classifier.WithReviews(classified, reviews.For(runId), (int)classified["actions"]!)["counts"]!;
+        if ((int)counts["unresolved"]! == 0) continue;
+        pending.Add(new JsonObject
+        {
+            ["runId"] = runId, ["scenarioId"] = run["scenarioId"]?.DeepClone(), ["agent"] = run["agent"]?.DeepClone(),
+            ["status"] = run["status"]?.DeepClone(), ["finishedAt"] = run["finishedAt"]?.DeepClone(),
+            ["unresolved"] = counts["unresolved"]!.DeepClone(), ["candidates"] = counts["candidates"]!.DeepClone()
+        });
+    }
+    return Results.Ok(new JsonObject
+    {
+        ["classificationVersion"] = Classifier.Version, ["scanned"] = runs.Count, ["runs"] = pending,
+        ["note"] = $"The newest {scan} research runs were checked; finished runs only."
+    });
+}, isRead: true));
+
 research.MapGet("/scenarios", () => Results.Ok(new
 {
     scenarios = ScenarioCatalog.All.Values.OrderBy(s => s.Id, StringComparer.Ordinal).ThenBy(s => s.Version).Select(s => new

@@ -23,7 +23,7 @@ READS = ["/internal/scenarios", f"/internal/runs/{RUN}", f"/internal/runs/{RUN}/
          f"/internal/runs/{RUN}/events/verify", f"/internal/runs/{RUN}/environment",
          f"/internal/runs/{RUN}/accounts/{RUN}/balance", f"/internal/runs/{RUN}/obligations/{RUN}",
          "/api/v1/runs", f"/api/v1/runs/{RUN}", f"/api/v1/runs/{RUN}/wallets", f"/api/v1/runs/{RUN}/ledger",
-         f"/api/v1/runs/{RUN}/actions", f"/api/v1/runs/{RUN}/events", f"/api/v1/runs/{RUN}/stream", f"/api/v1/runs/{RUN}/verify", f"/api/v1/runs/{RUN}/metrics", f"/api/v1/runs/{RUN}/classifications", f"/api/v1/runs/{RUN}/export?format=jsonl", "/api/v1/batches", f"/api/v1/batches/{RUN}",
+         f"/api/v1/runs/{RUN}/actions", f"/api/v1/runs/{RUN}/events", f"/api/v1/runs/{RUN}/stream", f"/api/v1/runs/{RUN}/verify", f"/api/v1/runs/{RUN}/metrics", f"/api/v1/runs/{RUN}/classifications", f"/api/v1/runs/{RUN}/export?format=jsonl", "/api/v1/reviews/pending", "/api/v1/batches", f"/api/v1/batches/{RUN}",
          f"/api/v1/compare?batch={RUN}&batch={RUN}", "/api/v1/scenarios",
          "/api/v1/models"]
 WRITES = ["/internal/runs", f"/internal/runs/{RUN}/start", f"/internal/runs/{RUN}/cancel", f"/internal/runs/{RUN}/funding",

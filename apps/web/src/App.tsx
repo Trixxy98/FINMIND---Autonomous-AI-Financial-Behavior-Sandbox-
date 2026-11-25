@@ -6,9 +6,10 @@ import { NewRunScreen } from './screens/NewRunScreen.js';
 import { RunScreen } from './screens/RunScreen.js';
 import { BatchesScreen } from './screens/BatchesScreen.js';
 import { CompareScreen } from './screens/CompareScreen.js';
+import { ReviewScreen } from './screens/ReviewScreen.js';
 
 type View = { name: 'runs' } | { name: 'new'; copied?: { form: RunForm; warnings: string[] } } | { name: 'run'; runId: string }
-  | { name: 'batches' } | { name: 'newBatch' } | { name: 'compare'; batchIds: string[] };
+  | { name: 'batches' } | { name: 'newBatch' } | { name: 'compare'; batchIds: string[] } | { name: 'review' };
 
 export function App() {
   // The token lives in component state only; reloading the page asks for it again (ADR-0014).
@@ -63,6 +64,7 @@ export function App() {
           <button type="button" onClick={() => setView({ name: 'runs' })}>Runs</button>
           <button type="button" onClick={() => setView({ name: 'new' })}>New run</button>
           <button type="button" onClick={() => setView({ name: 'batches' })}>Batches</button>
+          <button type="button" onClick={() => setView({ name: 'review' })}>Review</button>
           <button type="button" onClick={() => { setToken(null); setStatus(''); }}>Forget token</button>
         </nav>
       </header>
@@ -74,6 +76,7 @@ export function App() {
         <NewRunScreen key={JSON.stringify(view.copied ?? null)} api={api} copied={view.copied}
           onCreated={(runId) => setView({ name: 'run', runId })} onCancel={() => setView({ name: 'runs' })} />
       )}
+      {view.name === 'review' && <ReviewScreen api={api} onOpenRun={(runId) => setView({ name: 'run', runId })} />}
       {view.name === 'batches' && (
         <BatchesScreen api={api} onNewBatch={() => setView({ name: 'newBatch' })}
           onOpenRun={(runId) => setView({ name: 'run', runId })} onCompare={(batchIds) => setView({ name: 'compare', batchIds })} />
