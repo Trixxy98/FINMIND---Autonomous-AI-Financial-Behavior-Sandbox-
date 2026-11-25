@@ -1,6 +1,6 @@
 # FINMIND ADR 0017: Phase 5, Hardening and Publication
 
-- Status: Accepted 25 November 2026 (steps 1 to 3 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
+- Status: Accepted 25 November 2026 (steps 1 to 4 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
 - Date: 25 November 2026
 - Scope: threat model review, gap fixes, crash and concurrency checks,
   documentation, sample data, a reproducible demo, and the Phase 5 exit gate
@@ -170,6 +170,21 @@ Each step ends with tests, a report, and a stop for review:
   when its session expires; the drill accepts either outcome and checks the
   record in both.
 - Two workers, six runs: each run claimed once, none reclaimed, all completed.
+
+#### Step 4 as implemented
+
+- `services/agent-runtime/tests/test_no_financial_integration.py`, run in CI:
+  exact NuGet references and versions; exact pip requirements; exact npm
+  direct dependencies and every package name in the lockfile (platform
+  builds of rolldown, TypeScript, and lightningcss by pattern), all resolved
+  from the npm registry; container images; network hosts in source limited
+  to `127.0.0.1`, `localhost`, `api.anthropic.com`, and `platform.claude.com`;
+  and no payment, banking, brokerage, wallet, or crypto SDK or host name in
+  source or tests (173 files at the time of writing).
+- Checked by mutation: adding `stripe==12.0.0` to the requirements failed two
+  tests; the file was restored.
+- Not covered: transitive NuGet and pip dependencies are not locked. Locking
+  them (a NuGet lock file, pip hashes) is a possible follow-up.
 
 ## Out of scope
 

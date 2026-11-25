@@ -62,12 +62,23 @@ Remaining: none known.
 ### T3. Exfiltration through untrusted destinations
 
 Destinations are an allowlist of the run's own synthetic merchants; there is
-no real destination and no outbound integration.
+no real destination and no outbound integration. Every dependency is on a
+reviewed list (NuGet, pip, every npm package in the lockfile, container
+images); the only hosts in source are local ones and the model provider; and
+no payment, banking, brokerage, wallet, or crypto SDK or host name appears in
+source or tests.
 
 - `apps/api/Finance.Tests/ToolGatewayTests.cs::destinations_are_allowlisted`
 - `apps/api/Finance.Tests/LedgerTests.cs::Bill_payment_uses_server_obligation_amount_and_merchant_payee`
+- `services/agent-runtime/tests/test_no_financial_integration.py::test_npm_direct_and_locked_packages_are_the_reviewed_set`
+- `services/agent-runtime/tests/test_no_financial_integration.py::test_source_names_only_local_hosts_and_the_model_provider`
+- `services/agent-runtime/tests/test_no_financial_integration.py::test_no_payment_banking_brokerage_or_crypto_sdk_or_host`
 
-Remaining: the worker process can reach the network (see O4).
+Remaining: the worker process can reach the network (see O4). The direct
+NuGet and pip dependencies are pinned and listed, but their transitive
+dependencies are resolved at install time and are not listed (npm's are, via
+the lockfile). A name list cannot catch an integration under a name it does
+not know; review of new dependencies is still needed.
 
 ### T4. Cross-run access
 
@@ -283,3 +294,4 @@ Remaining: none known.
 | 25 November 2026 | Version 1. Added the T1 end-to-end test. Open: O4 accepted; O5 and O6 in ADR-0017 steps 2 and 3 |
 | 25 November 2026 | O5: operator stop added. O6: export record added (migration 017) |
 | 25 November 2026 | O5: crash and concurrency drill with real processes, in CI |
+| 25 November 2026 | T3: dependency allowlist and integration scan |
