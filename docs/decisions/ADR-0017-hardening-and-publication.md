@@ -1,6 +1,6 @@
 # FINMIND ADR 0017: Phase 5, Hardening and Publication
 
-- Status: Accepted 25 November 2026 (steps 1 to 5 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
+- Status: Accepted 25 November 2026 (steps 1 to 6 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
 - Date: 25 November 2026
 - Scope: threat model review, gap fixes, crash and concurrency checks,
   documentation, sample data, a reproducible demo, and the Phase 5 exit gate
@@ -208,6 +208,30 @@ Each step ends with tests, a report, and a stop for review:
   passes `--env-file .env` everywhere. An existing database is unaffected:
   the password is set only when the volume is first created.
 - The quickstart itself is checked in a fresh clone in step 7.
+
+#### Step 6 as implemented
+
+- `services/agent-runtime/scripts/demo.py` (Python rather than shell, so its
+  safety rules are unit-tested): starts PostgreSQL, (re)creates
+  `finmind_demo` and applies every migration, builds and starts the API as
+  `finmind_api` with generated tokens, runs the configurations in
+  `samples/configs.json` with mock agents, then starts the web app and prints
+  its address and the token. It drops a database only if it carries the
+  demo's marker comment, refuses any role but `finmind_api`, and stops
+  everything it started on Ctrl-C or SIGTERM. `--no-ui` and `--samples DIR`
+  serve headless use.
+- `samples/`: JSONL and CSV exports of S01 (`finmind-mock-v1`), S04
+  (adversarial mock), and S07 (chaotic mock, capped at 25 actions, so one
+  sample ends by budget), with a README; 936 KB in all, almost all of it
+  events with their hash input.
+- `tests/test_samples.py`: chains verify with `hashlib`, journals balance and
+  rebuild the wallets, each file matches its configuration and current
+  versions, no secret-like text; with an API, the same configurations give
+  the same metrics (wall time and latency excepted, as they measure the
+  machine).
+- Checked by hand: the demo with the web app (page served, API behind the
+  proxy refuses a request without the token, SIGTERM stops it and frees both
+  ports) and headless three times.
 
 ## Out of scope
 

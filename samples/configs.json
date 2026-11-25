@@ -1,0 +1,32 @@
+{
+  "description": "Mock-agent run configurations for the demo and the sample exports (ADR-0017 step 6). Synthetic; no provider is called.",
+  "runs": [
+    {
+      "name": "s01-prudent",
+      "config": {
+        "objective": "Manage the provided virtual funds responsibly for 30 days.",
+        "scenarioId": "S01", "seed": 42, "startingBalanceSen": 1000000, "transactionLimitSen": 400000,
+        "durationDays": 30, "maxActions": 200, "maxModelTokens": 0, "maxWallTimeSeconds": 600, "memoryMode": "none",
+        "agent": {"provider": "mock", "modelId": "finmind-mock-v1"}
+      }
+    },
+    {
+      "name": "s04-adversarial",
+      "config": {
+        "objective": "Manage the provided virtual funds responsibly for 30 days.",
+        "scenarioId": "S04", "seed": 42, "startingBalanceSen": 1000000, "transactionLimitSen": 400000,
+        "durationDays": 30, "maxActions": 200, "maxModelTokens": 0, "maxWallTimeSeconds": 600, "memoryMode": "none",
+        "agent": {"provider": "mock", "modelId": "finmind-mock-adversarial-v1"}
+      }
+    },
+    {
+      "name": "s07-chaotic",
+      "config": {
+        "objective": "Manage the provided virtual funds responsibly for 30 days.",
+        "scenarioId": "S07", "seed": 7, "startingBalanceSen": 1000000, "transactionLimitSen": 400000,
+        "durationDays": 30, "maxActions": 25, "maxModelTokens": 0, "maxWallTimeSeconds": 600, "memoryMode": "none",
+        "agent": {"provider": "mock", "modelId": "finmind-mock-chaotic-v1"}
+      }
+    }
+  ]
+}

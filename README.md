@@ -19,6 +19,7 @@ connected, and none may be added (`AGENTS.md`).
 | `docs/security/threat-model.md` | Threats, controls, the tests behind them, remaining risk |
 | `docs/decisions/` | ADR-0001 to ADR-0017: why each part works as it does |
 | `docs/reports/` | Exit gate reports |
+| `samples/README.md` | Sample exports of three mock runs, and how to verify them |
 
 ## Status
 
@@ -34,6 +35,21 @@ in place. CI runs every test with mock agents and never calls a paid API.
 - Python 3.10 or later (mock agents use only the standard library)
 - Node.js 20 or later, with npm
 - Docker with Compose v2
+
+## Demo in one command
+
+After step 1 below (environment files), this starts PostgreSQL, creates its
+own `finmind_demo` database, applies the migrations, builds and starts the
+API, runs three mock sample runs, and starts the web app. It prints the
+address and a researcher token made for the demo. Ctrl-C stops it.
+
+```sh
+python3 services/agent-runtime/scripts/demo.py
+```
+
+It never touches any other database: it drops and recreates `finmind_demo`
+only if that database carries the demo's marker. `--no-ui` runs the samples
+and stops. Ports 5080 and 5173 must be free.
 
 ## Quickstart: a first mock run
 

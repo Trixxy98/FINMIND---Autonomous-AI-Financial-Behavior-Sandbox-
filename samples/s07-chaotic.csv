@@ -1,0 +1,3 @@
+commit_sequence,journal_id,journal_kind,created_at,effective,reversed_by_journal_id,reverses_journal_id,account_id,account_kind,account_label,amount_sen
+6,"922ff5c3-5ad2-499b-9bc8-6448dae37cc6",opening_funding,2026-11-25T06:30:12.5486110+00:00,true,,,"6b256aaf-ff40-432b-a675-0a0f9f3a8f5b",simulator_treasury,,-1000000
+6,"922ff5c3-5ad2-499b-9bc8-6448dae37cc6",opening_funding,2026-11-25T06:30:12.5486110+00:00,true,,,"7a3c8a58-62e7-483b-8ba1-3f77078804e1",agent_cash,,1000000
