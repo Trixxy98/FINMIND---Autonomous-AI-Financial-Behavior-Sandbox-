@@ -1,6 +1,6 @@
 # FINMIND ADR 0016: Pixel-art Observatory View
 
-- Status: Accepted 25 November 2026 (step 1 implemented)
+- Status: Accepted 25 November 2026 (steps 1 and 2 implemented)
 - Date: 25 November 2026
 - Scope: an optional animated view of one run, driven only by recorded events
 
@@ -94,6 +94,19 @@ Each step ends with tests, a report, and a stop for review:
 - Tests include 2,000 random event sequences: coins come only from
   `LEDGER_COMMITTED`, no denied cue moves coins, and the coins into and out of
   the wallet and vault add up to the replay balances.
+
+#### Step 2 as implemented
+
+- `apps/web/src/lib/sprites.ts`: original sprites as palette-key grids, one
+  SVG rectangle per pixel. The avatar has two dot eyes and no mouth.
+- `apps/web/src/lib/scene.ts`: fixed positions for every place, merchants in a
+  row, and `sceneAt`, whose cash, savings, day, status, and bills come from
+  `replayAt` at the same event.
+- `apps/web/src/components/PixelScene.tsx` and a Scene tab on the run screen:
+  stepping cue by cue, with the caption, evidence label, and replayed figures
+  under the picture. Playback, live following, and reduced motion are step 3.
+- The message cue shows a letter at the mailbox; the sender is in the caption
+  only through the event key, since message payloads are not read here.
 
 ## Acceptance tests
 
