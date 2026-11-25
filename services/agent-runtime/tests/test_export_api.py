@@ -41,7 +41,7 @@ class ExportTests(unittest.TestCase):
     def test_header_states_versions_and_redaction(self):
         header = self.records[0]
         self.assertEqual(header["type"], "header")
-        self.assertEqual(header["exportSchemaVersion"], "finmind-export/v1")
+        self.assertEqual(header["exportSchemaVersion"], "finmind-export/v2")
         self.assertEqual((header["metricsVersion"], header["classificationVersion"]),
                          ("finmind-metrics/v1", "finmind-classifications/v1"))
         self.assertIn("redact", header["redaction"].lower())

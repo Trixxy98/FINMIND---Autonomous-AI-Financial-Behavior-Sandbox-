@@ -8,7 +8,7 @@ namespace Finmind.Api.Finance;
 // ADR-0015 step 4: export formats.
 public static class RunExport
 {
-    public const string Version = "finmind-export/v1";
+    public const string Version = "finmind-export/v2"; // v2 (ADR-0018): adds the outcomes record
 
     public const string RedactionNote =
         "Agent arguments and text are exported as stored, and were redacted when recorded (ADR-0009): control characters " +

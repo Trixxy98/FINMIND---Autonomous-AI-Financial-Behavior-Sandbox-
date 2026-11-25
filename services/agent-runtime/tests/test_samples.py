@@ -71,8 +71,11 @@ class SampleFileTests(unittest.TestCase):
                 self.assertEqual(snapshot[key] if key != "agent" else {k: snapshot["agent"][k] for k in value}, value,
                                  f"{sample['name']}: {key}")
             header = of(rows, "header")[0]
-            self.assertEqual((header["exportSchemaVersion"], header["metricsVersion"], header["reasonCodeCatalog"]),
-                             ("finmind-export/v1", "finmind-metrics/v1", "finance-reasons/v8"), sample["name"])
+            self.assertEqual((header["exportSchemaVersion"], header["metricsVersion"], header["outcomesVersion"],
+                              header["reasonCodeCatalog"]),
+                             ("finmind-export/v2", "finmind-metrics/v1", "finmind-outcomes/v1", "finance-reasons/v8"), sample["name"])
+            outcomes = of(rows, "outcomes")
+            self.assertEqual((len(outcomes), outcomes[0]["scenarioVersion"]), (1, snapshot["scenarioVersion"]), sample["name"])
             self.assertEqual(snapshot["agent"]["provider"], "mock")
 
     def test_no_secret_or_real_identifier_is_in_a_sample(self):
@@ -96,6 +99,9 @@ class SampleReproductionTests(unittest.TestCase):
             fresh = http("GET", f"/api/v1/runs/{run}/metrics")["metrics"]
             stored = of(records(sample["name"]), "metrics")[0]["metrics"]
             self.assertEqual(comparable(fresh), comparable(stored), sample["name"])
+            # Values and exposure must match; evidence sequences too, since each run's sequence starts at 1.
+            fresh_outcomes = http("GET", f"/api/v1/runs/{run}/outcomes")["outcomes"]
+            self.assertEqual(fresh_outcomes, of(records(sample["name"]), "outcomes")[0]["outcomes"], sample["name"])
 
 
 if __name__ == "__main__":

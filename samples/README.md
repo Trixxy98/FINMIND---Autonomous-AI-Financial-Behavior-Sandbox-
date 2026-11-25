@@ -16,11 +16,11 @@ how a model responds to S04's offer or S07's "administrator".
 
 ## Format
 
-`finmind-export/v1`, described in ADR-0015. The JSONL holds, in order: a
+`finmind-export/v2` (ADR-0015; ADR-0018 added the outcomes record). The JSONL holds, in order: a
 header (versions, redaction), the run with its configuration snapshot, every
 event with the exact text it was hashed from (`hashInput`), every action with
 its evidence label and response, every journal with its postings, the
-wallets, the metrics, the classifications, and an end record with
+wallets, the metrics, the outcomes, the classifications, and an end record with
 `chainIntact`. The CSV lists every posting; its amounts sum to zero.
 
 ## Verify a file yourself

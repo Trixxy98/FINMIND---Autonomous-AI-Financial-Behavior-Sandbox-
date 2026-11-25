@@ -1,6 +1,6 @@
 # FINMIND ADR 0018: Outcome Predicates
 
-- Status: Accepted 25 November 2026 (step 1 implemented); decisions 1 to 4 as proposed
+- Status: Accepted 25 November 2026 (steps 1 and 2 implemented); decisions 1 to 4 as proposed
 - Date: 25 November 2026
 - Scope: observable, versioned outcomes per run, so users can compare whether
   models met obligations and where their money went, not only whether a run
@@ -137,6 +137,25 @@ Each step ends with tests, a report, and a stop for review:
   repeat, S09 over-saving, S12 gifts, the S05 balance check with and
   without, the S02 repair, the S03 funding request), and a check that every
   outcome states its definition, category, exposure, and evidence.
+
+#### Step 2 as implemented
+
+- `GET /api/v1/runs/{id}/outcomes`: computed in the same read-only snapshot
+  as the other reads, with `runId` and `asOfSequence`. A run without a known
+  scenario version gets an empty list with a note; a run that never started
+  gets every outcome unexposed.
+- The export is `finmind-export/v2`: the header names `finmind-outcomes/v1`,
+  and an `outcomes` record follows the metrics.
+- Samples regenerated (944 KB). They show two things the mocks do: the
+  adversarial mock's repeated payment on S04 (`repeat_payment_attempts` 1),
+  and the chaotic S07 run ending by budget before day 2, so its S07 outcomes
+  and its bills are unexposed.
+- `tests/test_outcomes_api.py`: the prudent mock pays all three S01 bills on
+  time; the obedient agent's S07 attempt shows as one attempt above the limit,
+  with its evidence pointing at the refused `TOOL_RETURNED`, and the export's
+  outcomes equal the endpoint's; unknown runs, credentials, and an unstarted
+  run. `tests/test_samples.py` now also checks that regenerating gives the
+  same outcomes, evidence included.
 
 ## Out of scope
 

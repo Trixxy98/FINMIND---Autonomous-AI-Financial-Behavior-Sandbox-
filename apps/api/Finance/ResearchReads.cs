@@ -270,6 +270,39 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
         return metrics;
     }
 
+    // ADR-0018: finmind-outcomes/v1, computed from the run's events and its scenario, in the same snapshot.
+    public JsonObject? Outcomes(Guid runId) => Read((connection, transaction) => OutcomesIn(connection, transaction, runId));
+
+    private static JsonObject? OutcomesIn(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
+    {
+        JsonObject? snapshot;
+        using (var command = Command(connection, transaction, "SELECT config_snapshot::text FROM experiment_runs WHERE id = @id", ("id", runId)))
+        using (var reader = command.ExecuteReader())
+        {
+            if (!reader.Read()) return null;
+            snapshot = reader.IsDBNull(0) ? null : JsonNode.Parse(reader.GetString(0))!.AsObject();
+        }
+        var scenario = (string?)snapshot?["scenarioVersion"] is { } label ? ScenarioCatalog.Find(label) : null;
+        if (scenario is null)
+            return new JsonObject
+            {
+                ["outcomesVersion"] = OutcomesV1.Version, ["scenarioVersion"] = null, ["runId"] = runId, ["outcomes"] = new JsonArray(),
+                ["exposedNote"] = "Outcomes need a managed run on a known scenario version."
+            };
+        var events = new List<RunEvent>();
+        using (var command = Command(connection, transaction,
+            "SELECT sequence, event_type, payload::text, trace_id FROM run_events WHERE run_id = @id ORDER BY sequence", ("id", runId)))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read())
+                events.Add(new RunEvent(runId, reader.GetInt64(0), reader.GetString(1), 0, default, "", null, null, null, null, null, null,
+                    JsonNode.Parse(reader.GetString(2))!.AsObject(), null, null, reader.IsDBNull(3) ? null : reader.GetString(3)));
+        long Number(string key) => snapshot![key] is JsonValue value && value.TryGetValue<long>(out var n) ? n : 0;
+        var outcomes = OutcomesV1.Compute(new OutcomeInput(scenario, (int)Number("durationDays"), Number("startingBalanceSen"), events));
+        outcomes["runId"] = runId;
+        outcomes["asOfSequence"] = events.Count == 0 ? 0 : events[^1].Sequence;
+        return outcomes;
+    }
+
     // Ordered by the LEDGER_COMMITTED sequence; journals from before the event log come first.
     public JsonObject? Ledger(Guid runId, long afterSequence, int limit) => Read((connection, transaction) => LedgerIn(connection, transaction, runId, afterSequence, limit));
 
@@ -446,7 +479,8 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
             {
                 ["type"] = "header", ["exportSchemaVersion"] = RunExport.Version, ["runId"] = runId,
                 ["exportedAt"] = DateTimeOffset.UtcNow, ["metricsVersion"] = MetricsV1.Version,
-                ["classificationVersion"] = Classifier.Version, ["reasonCodeCatalog"] = LedgerReasonCodes.CatalogVersion,
+                ["classificationVersion"] = Classifier.Version, ["outcomesVersion"] = OutcomesV1.Version,
+                ["reasonCodeCatalog"] = LedgerReasonCodes.CatalogVersion,
                 ["redaction"] = RunExport.RedactionNote, ["hashSchemes"] = RunExport.HashNote
             }
         };
@@ -491,6 +525,9 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
         var metrics = MetricsIn(connection, transaction, runId)!;
         metrics["type"] = "metrics";
         records.Add(metrics);
+        var outcomes = OutcomesIn(connection, transaction, runId)!;
+        outcomes["type"] = "outcomes";
+        records.Add(outcomes);
         var classified = ClassificationsIn(connection, transaction, runId)!;
         var withReviews = Classifier.WithReviews(classified, ReviewStore.ReviewsIn(connection, transaction, runId), (int)classified["actions"]!);
         withReviews["type"] = "classifications";
