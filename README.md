@@ -29,6 +29,12 @@ API, metrics, comparison, classification with human review, export, replay,
 the web app with a pixel-art view, the operator stop, and a crash drill are
 in place. CI runs every test with mock agents and never calls a paid API.
 
+FINMIND runs locally: each researcher runs their own copy and brings their
+own provider key. It is not a hosted service. The Claude adapter is tested
+against the pinned Anthropic SDK and a fake transport; it has not yet been
+verified against the live API. `services/agent-runtime/scripts/smoke_claude.py` (US$0.50 budget)
+is the first check for anyone with a key. Other providers are planned.
+
 ## Prerequisites
 
 - .NET 10 SDK
@@ -83,7 +89,11 @@ docker compose --env-file .env -f infra/compose.yaml exec postgres psql -U finmi
 ```
 
 `--env-file .env` matters: without it, Compose looks for `.env` in `infra/`
-and uses its built-in placeholder password.
+and uses its built-in placeholder password. On a new database, lines such as
+`NOTICE: trigger ... does not exist, skipping` are expected: each migration
+removes an old version of a trigger before creating it. To run a second copy
+of FINMIND on one machine, give it its own `COMPOSE_PROJECT_NAME` and
+`POSTGRES_PORT` in `.env` (and that port in the other `.env` files).
 
 **3. API** (first shell). Listens on `127.0.0.1:5080`.
 

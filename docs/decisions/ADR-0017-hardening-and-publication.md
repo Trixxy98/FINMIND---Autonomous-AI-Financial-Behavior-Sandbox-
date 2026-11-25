@@ -1,6 +1,6 @@
 # FINMIND ADR 0017: Phase 5, Hardening and Publication
 
-- Status: Accepted 25 November 2026 (steps 1 to 6 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
+- Status: Accepted 25 November 2026; implemented (steps 1 to 7); Phase 5 exit gate passed. Decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
 - Date: 25 November 2026
 - Scope: threat model review, gap fixes, crash and concurrency checks,
   documentation, sample data, a reproducible demo, and the Phase 5 exit gate
@@ -232,6 +232,22 @@ Each step ends with tests, a report, and a stop for review:
 - Checked by hand: the demo with the web app (page served, API behind the
   proxy refuses a request without the token, SIGTERM stops it and frees both
   ports) and headless three times.
+
+#### Step 7 as implemented
+
+- A fresh clone from GitHub (`f106862`), set up from the README alone in its
+  own Compose project and port, with new secrets; no existing database was
+  used. Every README step and check passed: 472 ledger and API tests, 157
+  runtime tests with an API, 61 web tests and the build, the crash drill, the
+  demo, and the first mock run through the web app.
+- The Phase 4 gate reproduced the Phase 4 report exactly, and the demo's
+  exports reproduced the committed samples' metrics.
+- Findings fixed: `.env.example` sets `COMPOSE_PROJECT_NAME` (a second
+  checkout would otherwise share the first one's database), and the README
+  explains migration notices and running a second copy. The README status now
+  says the Claude adapter is not yet verified against the live API and that
+  FINMIND is local-only.
+- Report: `docs/reports/phase5-exit-gate.md`.
 
 ## Out of scope
 
