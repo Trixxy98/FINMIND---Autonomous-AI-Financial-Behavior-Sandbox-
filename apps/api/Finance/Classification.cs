@@ -215,9 +215,20 @@ public sealed class ReviewStore(NpgsqlDataSource dataSource)
     public Dictionary<string, List<JsonObject>> For(Guid runId)
     {
         using var connection = dataSource.OpenConnection();
-        using var command = new NpgsqlCommand(
+        return Load(new NpgsqlCommand(
             "SELECT id, item_key, classification_version, label, note, reviewer, created_at FROM classification_reviews " +
-            "WHERE run_id = @run ORDER BY created_at, id", connection);
+            "WHERE run_id = @run ORDER BY created_at, id", connection), runId);
+    }
+
+    // Inside another read, so an export sees reviews from the same snapshot.
+    public static Dictionary<string, List<JsonObject>> ReviewsIn(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId) =>
+        Load(new NpgsqlCommand(
+            "SELECT id, item_key, classification_version, label, note, reviewer, created_at FROM classification_reviews " +
+            "WHERE run_id = @run ORDER BY created_at, id", connection, transaction), runId);
+
+    private static Dictionary<string, List<JsonObject>> Load(NpgsqlCommand command, Guid runId)
+    {
+        using var owned = command;
         command.Parameters.AddWithValue("run", runId);
         using var reader = command.ExecuteReader();
         var reviews = new Dictionary<string, List<JsonObject>>();

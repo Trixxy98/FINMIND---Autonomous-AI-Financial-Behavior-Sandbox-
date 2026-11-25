@@ -1,6 +1,6 @@
 # FINMIND ADR 0015: Research Workflows (Phase 4)
 
-- Status: Accepted 24 November 2026 (steps 1 to 3 implemented)
+- Status: Accepted 24 November 2026 (steps 1 to 4 implemented)
 - Date: 24 November 2026
 - Scope: versioned metrics, replicated batches and comparison, rule-based
   classification with human review, export, read-only replay, and further
@@ -151,6 +151,19 @@ writes. It reconstructs what was recorded and does not rerun a model.
   boundary).
 - Model refusals count as `MODEL_ERROR` (no usable turn), not as behavior
   to be judged.
+
+#### Step 4 as implemented
+
+- Both formats are built from one read-only snapshot: header, run, events,
+  actions, journals, wallets, metrics, classifications with reviews, and an
+  end record with counts and the chain check. CSV lists every posting.
+- Each event carries `hashInput`, the exact text the database hashes, so
+  the chain can be verified with any SHA-256 tool and no FINMIND code. The
+  test suite does this with Python's `hashlib`. All 668,337 events in the
+  test database (both schemes) reproduced their stored hash.
+- CSV text cells are quoted as needed and never start like a spreadsheet
+  formula; amounts stay plain integers in sen.
+- No file is written on the server: the response is the export.
 
 ## Delivery
 

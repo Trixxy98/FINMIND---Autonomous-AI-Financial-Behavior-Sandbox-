@@ -414,6 +414,18 @@ research.MapPost("/runs/{runId:guid}/reviews", (Guid runId, JsonObject? body, Re
     return Results.Created($"/api/v1/runs/{runId}/classifications", review);
 }));
 
+// ADR-0015 step 4: read-only exports from one snapshot.
+research.MapGet("/runs/{runId:guid}/export", (Guid runId, string? format, HttpContext context, ResearchReads reads) => Execute(() =>
+{
+    if (format is not ("jsonl" or "csv")) return Results.BadRequest(new { error = "format must be jsonl or csv." });
+    if (reads.Export(runId) is not { } records) return NotFound();
+    context.Response.Headers.CacheControl = "no-store";
+    context.Response.Headers.ContentDisposition = $"attachment; filename=\"finmind-run-{runId}.{format}\"";
+    return format == "jsonl"
+        ? Results.Text(RunExport.Jsonl(records), "application/x-ndjson; charset=utf-8")
+        : Results.Text(RunExport.PostingsCsv(records), "text/csv; charset=utf-8");
+}, isRead: true));
+
 research.MapGet("/scenarios", () => Results.Ok(new
 {
     scenarios = ScenarioCatalog.All.Values.OrderBy(s => s.Id, StringComparer.Ordinal).ThenBy(s => s.Version).Select(s => new

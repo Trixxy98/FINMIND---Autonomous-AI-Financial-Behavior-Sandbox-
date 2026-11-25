@@ -95,7 +95,9 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
         return new JsonObject { ["runs"] = runs, ["nextBefore"] = runs.Count > 0 ? runs[^1]!["runId"]!.DeepClone() : null };
     });
 
-    public JsonObject? GetRun(Guid runId) => Read((connection, transaction) =>
+    public JsonObject? GetRun(Guid runId) => Read((connection, transaction) => GetRunIn(connection, transaction, runId));
+
+    private static JsonObject? GetRunIn(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
     {
         JsonObject run;
         long tokens, cost, reserved, elapsed;
@@ -137,7 +139,7 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
             ["wallTimeSeconds"] = new JsonObject { ["elapsed"] = elapsed, ["max"] = snapshot["maxWallTimeSeconds"]?.DeepClone() }
         };
         return run;
-    });
+    }
 
     private static bool Exists(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
     {
@@ -197,7 +199,9 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
     }
 
     // ADR-0015: finmind-metrics/v1, from the same snapshot as everything it is derived from.
-    public JsonObject? Metrics(Guid runId) => Read((connection, transaction) =>
+    public JsonObject? Metrics(Guid runId) => Read((connection, transaction) => MetricsIn(connection, transaction, runId));
+
+    private static JsonObject? MetricsIn(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
     {
         JsonObject? snapshot;
         long tokens, cost, reserved, elapsed;
@@ -264,10 +268,12 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
         metrics["runId"] = runId;
         metrics["researchEligible"] = managed;
         return metrics;
-    });
+    }
 
     // Ordered by the LEDGER_COMMITTED sequence; journals from before the event log come first.
-    public JsonObject? Ledger(Guid runId, long afterSequence, int limit) => Read((connection, transaction) =>
+    public JsonObject? Ledger(Guid runId, long afterSequence, int limit) => Read((connection, transaction) => LedgerIn(connection, transaction, runId, afterSequence, limit));
+
+    private static JsonObject? LedgerIn(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId, long afterSequence, int limit)
     {
         if (!Exists(connection, transaction, runId)) return null;
         var journals = new List<JsonObject>();
@@ -328,7 +334,7 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
             ["journals"] = new JsonArray(journals.Select(j => (JsonNode)j).ToArray()),
             ["nextAfterSequence"] = last ?? afterSequence
         };
-    });
+    }
 
     public JsonObject? ListActions(Guid runId, long afterSequence, int limit) => Read((connection, transaction) =>
     {
@@ -392,7 +398,9 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
     });
 
     // ADR-0015 step 3: rule labels and review candidates, from the same snapshot as the facts they cite.
-    public JsonObject? Classifications(Guid runId) => Read((connection, transaction) =>
+    public JsonObject? Classifications(Guid runId) => Read((connection, transaction) => ClassificationsIn(connection, transaction, runId));
+
+    private static JsonObject? ClassificationsIn(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid runId)
     {
         if (!Exists(connection, transaction, runId)) return null;
         var kinds = new Dictionary<Guid, string>();
@@ -426,6 +434,81 @@ public sealed class ResearchReads(NpgsqlDataSource dataSource)
         result["runId"] = runId;
         result["actions"] = actions.Count;
         return result;
+    }
+
+    // ADR-0015 step 4: everything about a run from one snapshot, as export records. Null when the run does not exist.
+    public List<JsonObject>? Export(Guid runId) => Read((connection, transaction) =>
+    {
+        if (GetRunIn(connection, transaction, runId) is not { } run) return null;
+        var records = new List<JsonObject>
+        {
+            new()
+            {
+                ["type"] = "header", ["exportSchemaVersion"] = RunExport.Version, ["runId"] = runId,
+                ["exportedAt"] = DateTimeOffset.UtcNow, ["metricsVersion"] = MetricsV1.Version,
+                ["classificationVersion"] = Classifier.Version, ["reasonCodeCatalog"] = LedgerReasonCodes.CatalogVersion,
+                ["redaction"] = RunExport.RedactionNote, ["hashSchemes"] = RunExport.HashNote
+            }
+        };
+        run["type"] = "run";
+        records.Add(run);
+
+        using (var command = Command(connection, transaction,
+            $"SELECT sequence, event_type, event_version, occurred_at, virtual_time, source, trace_id, operation, outcome, reason_code, " +
+            $"idempotency_key, journal_id, obligation_id, payload::text, encode(prev_hash, 'hex'), encode(event_hash, 'hex'), hash_version, " +
+            $"id, {RunExport.HashInputSql} FROM run_events WHERE run_id = @id ORDER BY sequence", ("id", runId)))
+        using (var reader = command.ExecuteReader())
+        {
+            string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+            while (reader.Read())
+                records.Add(new JsonObject
+                {
+                    ["type"] = "event", ["id"] = reader.GetGuid(17), ["sequence"] = reader.GetInt64(0), ["eventType"] = reader.GetString(1),
+                    ["eventVersion"] = reader.GetInt32(2), ["occurredAt"] = reader.GetFieldValue<DateTimeOffset>(3),
+                    ["virtualTime"] = reader.IsDBNull(4) ? null : JsonValue.Create(reader.GetFieldValue<DateTimeOffset>(4)),
+                    ["source"] = reader.GetString(5), ["traceId"] = Text(6), ["operation"] = Text(7), ["outcome"] = Text(8),
+                    ["reasonCode"] = Text(9), ["idempotencyKey"] = Text(10),
+                    ["journalId"] = reader.IsDBNull(11) ? null : reader.GetGuid(11),
+                    ["obligationId"] = reader.IsDBNull(12) ? null : reader.GetGuid(12),
+                    ["payload"] = JsonNode.Parse(reader.GetString(13)), ["prevHash"] = Text(14), ["eventHash"] = reader.GetString(15),
+                    ["hashVersion"] = (int)reader.GetInt16(16), ["hashInput"] = reader.GetString(18)
+                });
+        }
+        foreach (var action in Actions(connection, transaction, runId, 0, int.MaxValue))
+        {
+            action["type"] = "action";
+            records.Add(action);
+        }
+        foreach (var journal in LedgerIn(connection, transaction, runId, 0, int.MaxValue)!["journals"]!.AsArray())
+        {
+            var record = journal!.AsObject().DeepClone().AsObject();
+            record["type"] = "journal";
+            records.Add(record);
+        }
+        var wallets = WalletsIn(connection, transaction, runId);
+        wallets["type"] = "wallets";
+        records.Add(wallets);
+        var metrics = MetricsIn(connection, transaction, runId)!;
+        metrics["type"] = "metrics";
+        records.Add(metrics);
+        var classified = ClassificationsIn(connection, transaction, runId)!;
+        var withReviews = Classifier.WithReviews(classified, ReviewStore.ReviewsIn(connection, transaction, runId), (int)classified["actions"]!);
+        withReviews["type"] = "classifications";
+        records.Add(withReviews);
+        bool intact;
+        using (var command = Command(connection, transaction, "SELECT finmind_verify_run_events(@id) IS NULL", ("id", runId)))
+            intact = command.ExecuteScalar() is true;
+        records.Add(new JsonObject
+        {
+            ["type"] = "end", ["chainIntact"] = intact,
+            ["counts"] = new JsonObject
+            {
+                ["events"] = records.Count(r => (string)r["type"]! == "event"),
+                ["actions"] = records.Count(r => (string)r["type"]! == "action"),
+                ["journals"] = records.Count(r => (string)r["type"]! == "journal")
+            }
+        });
+        return records;
     });
 
     public bool RunExists(Guid runId) => Read((connection, transaction) => Exists(connection, transaction, runId));
