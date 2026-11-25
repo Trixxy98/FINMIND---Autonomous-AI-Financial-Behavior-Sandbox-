@@ -57,6 +57,8 @@ public static class StartupChecks
         foreach (var name in new[] { "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN" })
             if (!string.IsNullOrEmpty(setting(name)))
                 problems.Add($"{name} is set; provider credentials belong to the worker only (ADR-0012).");
+        if (!AgentGatewayRules.IsValidSessionLifetime(setting("FINMIND_SESSION_LIFETIME_SECONDS")))
+            problems.Add($"FINMIND_SESSION_LIFETIME_SECONDS must be a whole number of seconds from {AgentGatewayRules.MinSessionSeconds} to {AgentGatewayRules.MaxSessionSeconds}.");
         return problems;
     }
 

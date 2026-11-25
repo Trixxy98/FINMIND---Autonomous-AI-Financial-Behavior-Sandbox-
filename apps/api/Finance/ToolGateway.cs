@@ -8,15 +8,17 @@ namespace Finmind.Api.Finance;
 
 // ADR-0009: the agent tool gateway. Every call is recorded before and after evaluation; the server resolves
 // the run and the agent's accounts from the session, never from tool arguments.
-public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
+public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time, TimeSpan? sessionLifetime = null)
 {
+    private readonly TimeSpan _sessionLifetime = sessionLifetime ?? AgentGatewayRules.SessionLifetime;
+
     // Sessions: 32 random bytes, returned once; only the SHA-256 hash is stored.
     public (string Token, RunInfo Run)? Claim()
     {
         ReapExpiredSessions();
         var token = Base64UrlToken();
         var now = time.GetUtcNow();
-        var run = ledger.ClaimQueuedRun(HashToken(token), now, now + AgentGatewayRules.SessionLifetime);
+        var run = ledger.ClaimQueuedRun(HashToken(token), now, now + _sessionLifetime);
         return run is null ? null : (token, run);
     }
 
@@ -24,7 +26,7 @@ public sealed class ToolGateway(IFinanceLedger ledger, TimeProvider time)
     {
         if (string.IsNullOrEmpty(token) || token.Length > 200) return null;
         var now = time.GetUtcNow();
-        return ledger.ResolveSession(HashToken(token), now, now + AgentGatewayRules.SessionLifetime);
+        return ledger.ResolveSession(HashToken(token), now, now + _sessionLifetime);
     }
 
     // ADR-0013 A1: RUNNING runs whose worker is gone become FAILED.

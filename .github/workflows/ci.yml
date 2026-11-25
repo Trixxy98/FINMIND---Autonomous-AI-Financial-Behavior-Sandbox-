@@ -94,6 +94,11 @@ jobs:
       - name: Run finance unit and PostgreSQL integration tests
         run: dotnet test apps/api/Finance.Tests/Finmind.Finance.Tests.csproj --configuration Release --no-build --no-restore
 
+      # ADR-0017 step 3: kill a worker and the API mid-run, and share a queue between two workers (mock agents only).
+      # It starts and stops its own API, so it runs before the API for the end-to-end tests.
+      - name: Crash and concurrency drill
+        run: python -B services/agent-runtime/scripts/crash_drill.py
+
       # ADR-0011: end-to-end tests run the real API against the test database as the restricted role.
       - name: Start API for end-to-end tests
         env:

@@ -1,6 +1,6 @@
 # FINMIND ADR 0017: Phase 5, Hardening and Publication
 
-- Status: Accepted 25 November 2026 (steps 1 and 2 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
+- Status: Accepted 25 November 2026 (steps 1 to 3 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
 - Date: 25 November 2026
 - Scope: threat model review, gap fixes, crash and concurrency checks,
   documentation, sample data, a reproducible demo, and the Phase 5 exit gate
@@ -149,6 +149,27 @@ Each step ends with tests, a report, and a stop for review:
   stopped, with "Resume runs…"; both ask for a reason.
 - New runs record `finance-reasons/v8`; a comparison of runs from before and
   after this change lists the catalog version as a metadata difference.
+
+#### Step 3 as implemented
+
+- `FINMIND_SESSION_LIFETIME_SECONDS` (15 to 600, default 600) shortens the
+  worker session for drills; the API refuses to start with any other value.
+- `services/agent-runtime/scripts/crash_drill.py` starts its own API on a test
+  database (the name must end in `_test`) with generated tokens and a
+  20-second session, runs mock agents only, and checks every run it touched:
+  intact chain, reconciled wallets, balanced journals, at most one commit per
+  tool call, and no token in its logs. It runs in CI before the end-to-end
+  API starts.
+- Worker killed mid-run: the run stays RUNNING with no further actions, then
+  fails with "Worker session expired." once its session lapses; a new worker
+  completes the next queued run. A RUNNING run is not resumed: its agent's
+  context died with the worker, so resuming it would not be the same run.
+- API killed mid-run and restarted: in the recorded drill the run had 5
+  actions at the restart and completed with 38; the worker's built-in retries
+  covered the outage. If an outage outlasts the retries, the run fails safely
+  when its session expires; the drill accepts either outcome and checks the
+  record in both.
+- Two workers, six runs: each run claimed once, none reclaimed, all completed.
 
 ## Out of scope
 

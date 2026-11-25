@@ -235,9 +235,20 @@ recovered by its idempotency key.
 - `apps/api/Finance.Tests/OperatorStopTests.cs::Postgres_starts_racing_a_stop_leave_no_active_run`
 - `services/agent-runtime/tests/test_operator_api.py::test_stop_cancels_runs_and_refuses_starts_and_claims_until_resumed`
 
-Remaining: crash recovery is not yet tested with real processes being killed
-(ADR-0017 step 3). A model request already sent when the stop arrives still
-completes and its cost is recorded.
+A drill with real processes runs in CI: a worker killed mid-run (the run
+fails safely once its session expires; the queue carries on), the API killed
+mid-run and restarted (the worker's retries carry the run through), and two
+workers sharing a queue (each run claimed once).
+
+- `services/agent-runtime/scripts/crash_drill.py::drill_worker_killed`
+- `services/agent-runtime/scripts/crash_drill.py::drill_api_restarted`
+- `services/agent-runtime/scripts/crash_drill.py::drill_two_workers`
+- `apps/api/Finance.Tests/SessionLifetimeTests.cs::A_gateway_expires_sessions_after_its_configured_lifetime`
+
+Remaining: a run whose worker dies while RUNNING is failed, not resumed; it
+must be run again. Detection takes up to the session lifetime (10 minutes by
+default). A model request already sent when a stop arrives still completes
+and its cost is recorded.
 
 ### O6. Export access
 
@@ -271,3 +282,4 @@ Remaining: none known.
 |---|---|
 | 25 November 2026 | Version 1. Added the T1 end-to-end test. Open: O4 accepted; O5 and O6 in ADR-0017 steps 2 and 3 |
 | 25 November 2026 | O5: operator stop added. O6: export record added (migration 017) |
+| 25 November 2026 | O5: crash and concurrency drill with real processes, in CI |

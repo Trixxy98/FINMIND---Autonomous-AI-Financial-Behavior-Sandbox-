@@ -13,7 +13,9 @@ builder.Services.AddSingleton<ResearchReads>();
 builder.Services.AddSingleton<BatchStore>();
 builder.Services.AddSingleton<ReviewStore>();
 builder.Services.AddSingleton<ExportLog>();
-builder.Services.AddSingleton(sp => new ToolGateway(sp.GetRequiredService<PostgresLedger>(), TimeProvider.System));
+builder.Services.AddSingleton(sp => new ToolGateway(sp.GetRequiredService<PostgresLedger>(), TimeProvider.System,
+    AgentGatewayRules.IsValidSessionLifetime(builder.Configuration["FINMIND_SESSION_LIFETIME_SECONDS"])
+        ? AgentGatewayRules.SessionLifetimeFrom(builder.Configuration["FINMIND_SESSION_LIFETIME_SECONDS"]) : null));
 var app = builder.Build();
 
 // ADR-0013 A3: refuse to start with unsafe settings or a privileged database role.

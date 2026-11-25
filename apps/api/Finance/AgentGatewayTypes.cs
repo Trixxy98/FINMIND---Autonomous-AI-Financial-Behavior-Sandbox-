@@ -40,6 +40,16 @@ public sealed record AgentView(Guid CashAccountId, Guid? SavingsAccountId, IRead
 public static class AgentGatewayRules
 {
     public static readonly TimeSpan SessionLifetime = TimeSpan.FromMinutes(10);
+
+    // ADR-0017 step 3: FINMIND_SESSION_LIFETIME_SECONDS shortens sessions for crash drills; StartupChecks enforces 15 to 600.
+    public const int MinSessionSeconds = 15, MaxSessionSeconds = 600;
+
+    public static bool IsValidSessionLifetime(string? value) =>
+        value is null || (int.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var s)
+                          && s is >= MinSessionSeconds and <= MaxSessionSeconds);
+
+    public static TimeSpan SessionLifetimeFrom(string? value) =>
+        value is null ? SessionLifetime : TimeSpan.FromSeconds(int.Parse(value, System.Globalization.CultureInfo.InvariantCulture));
     public const string BudgetExhaustedReason = "Action budget exhausted.";
     public const string WallTimeExhaustedReason = "Wall-time budget exhausted.";
     public const string TokenExhaustedReason = "Token budget exhausted.";
