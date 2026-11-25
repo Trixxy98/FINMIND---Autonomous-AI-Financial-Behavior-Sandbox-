@@ -144,6 +144,9 @@ Catalog `finance-reasons/v7` (ADR-0013) adds `DIRECT_WRITE_NOT_ALLOWED`
 `null` (unknown) and the message says to retry with the same idempotency key
 or request ID. A failed read keeps `committed: false`.
 
+Catalog `finance-reasons/v8` (ADR-0017) adds `OPERATOR_STOPPED` (conflict):
+a run cannot be started while the operator stop is on.
+
 ## Out of scope
 
 - Durable storage of decisions. Persisting proposals and decisions with

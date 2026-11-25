@@ -519,6 +519,8 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
                 var storedReason = RunLifecycle.NormalizeReason(to, reason);
                 using var connection = dataSource.OpenConnection();
                 using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+                // ADR-0017: a start holds the shared switch lock, so it finishes before a stop lists active runs or sees the stop.
+                if (to == RunStatus.Queued && IsStopped(connection, transaction)) throw OperatorSwitch.Refusal();
                 var from = LockExistingRun(connection, transaction, runId);
                 RunLifecycle.EnsureTransition(from, to);
                 if (to == RunStatus.Running)
@@ -770,6 +772,11 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         using (var connection = dataSource.OpenConnection())
         using (var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted))
         {
+            if (IsStopped(connection, transaction))
+            {
+                transaction.Commit();
+                return null;
+            }
             using var select = new NpgsqlCommand(
                 "SELECT id FROM experiment_runs WHERE status = 'QUEUED' ORDER BY queued_at, id LIMIT 1 FOR UPDATE SKIP LOCKED",
                 connection, transaction);
@@ -811,6 +818,103 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
             transaction.Commit();
         }
         return GetRun(runId);
+    }
+
+    // ADR-0017: takes the shared switch lock for the rest of the transaction, then reads the latest switch action.
+    private static bool IsStopped(NpgsqlConnection connection, NpgsqlTransaction transaction)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT pg_advisory_xact_lock_shared(@key); " +
+            "SELECT action FROM operator_switch_log ORDER BY seq DESC LIMIT 1", connection, transaction);
+        command.Parameters.AddWithValue("key", OperatorSwitch.LockKey);
+        using var reader = command.ExecuteReader();
+        reader.NextResult();
+        return reader.Read() && reader.GetString(0) == "stop";
+    }
+
+    public OperatorStopResult StopAll(string? reason, string source)
+    {
+        var stored = OperatorSwitch.Reason(reason, "stop runs");
+        var active = new List<Guid>();
+        using (var connection = dataSource.OpenConnection())
+        using (var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted))
+        {
+            // The exclusive lock waits for starts and claims in flight; after the commit, none can begin.
+            using (var lockCommand = new NpgsqlCommand("SELECT pg_advisory_xact_lock(@key)", connection, transaction))
+            {
+                lockCommand.Parameters.AddWithValue("key", OperatorSwitch.LockKey);
+                lockCommand.ExecuteNonQuery();
+            }
+            using (var list = new NpgsqlCommand(
+                "SELECT id FROM experiment_runs WHERE status IN ('QUEUED', 'INITIALIZING', 'RUNNING') ORDER BY id", connection, transaction))
+            using (var reader = list.ExecuteReader())
+                while (reader.Read()) active.Add(reader.GetGuid(0));
+            InsertSwitch(connection, transaction, "stop", stored, source, active.Count);
+            transaction.Commit();
+        }
+        var cancelled = new List<Guid>();
+        foreach (var run in active)
+        {
+            try
+            {
+                TransitionRun(run, RunStatus.Cancelled, OperatorSwitch.CancellationReason(stored), source);
+                cancelled.Add(run);
+            }
+            catch (LedgerException e) when (e.ReasonCode == LedgerReasonCode.InvalidRunTransition)
+            {
+                // It ended on its own between the stop and its cancellation.
+            }
+        }
+        return new OperatorStopResult(GetOperatorState(), cancelled);
+    }
+
+    public OperatorState ResumeAll(string? reason, string source)
+    {
+        var stored = OperatorSwitch.Reason(reason, "resume runs");
+        using var connection = dataSource.OpenConnection();
+        using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+        using (var lockCommand = new NpgsqlCommand("SELECT pg_advisory_xact_lock(@key)", connection, transaction))
+        {
+            lockCommand.Parameters.AddWithValue("key", OperatorSwitch.LockKey);
+            lockCommand.ExecuteNonQuery();
+        }
+        InsertSwitch(connection, transaction, "resume", stored, source, 0);
+        transaction.Commit();
+        return GetOperatorState();
+    }
+
+    private static void InsertSwitch(NpgsqlConnection connection, NpgsqlTransaction transaction, string action, string reason, string source, int cancelled)
+    {
+        using var insert = new NpgsqlCommand(
+            "INSERT INTO operator_switch_log (id, action, reason, source, cancelled_runs) VALUES (@id, @action, @reason, @source, @cancelled)",
+            connection, transaction);
+        insert.Parameters.AddWithValue("id", Guid.NewGuid());
+        insert.Parameters.AddWithValue("action", action);
+        insert.Parameters.AddWithValue("reason", reason);
+        insert.Parameters.AddWithValue("source", source);
+        insert.Parameters.AddWithValue("cancelled", cancelled);
+        insert.ExecuteNonQuery();
+    }
+
+    public OperatorState GetOperatorState()
+    {
+        var latest = OperatorHistory(1);
+        return latest.Count == 0 ? new OperatorState(false, null, null)
+            : new OperatorState(latest[0].Action == "stop", latest[0].Reason, latest[0].At);
+    }
+
+    public IReadOnlyList<OperatorSwitchEntry> OperatorHistory(int limit)
+    {
+        using var connection = dataSource.OpenConnection();
+        using var command = new NpgsqlCommand(
+            "SELECT action, reason, source, cancelled_runs, created_at FROM operator_switch_log ORDER BY seq DESC LIMIT @limit", connection);
+        command.Parameters.AddWithValue("limit", Math.Clamp(limit, 1, 500));
+        using var reader = command.ExecuteReader();
+        var entries = new List<OperatorSwitchEntry>();
+        while (reader.Read())
+            entries.Add(new OperatorSwitchEntry(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3),
+                reader.GetFieldValue<DateTimeOffset>(4)));
+        return entries;
     }
 
     // Re-read after the run lock, in a new statement: another claim or a heartbeat may have committed meanwhile.

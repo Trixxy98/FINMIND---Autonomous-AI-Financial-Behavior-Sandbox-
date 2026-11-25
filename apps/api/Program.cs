@@ -12,6 +12,7 @@ builder.Services.AddSingleton<PostgresLedger>();
 builder.Services.AddSingleton<ResearchReads>();
 builder.Services.AddSingleton<BatchStore>();
 builder.Services.AddSingleton<ReviewStore>();
+builder.Services.AddSingleton<ExportLog>();
 builder.Services.AddSingleton(sp => new ToolGateway(sp.GetRequiredService<PostgresLedger>(), TimeProvider.System));
 var app = builder.Build();
 
@@ -415,16 +416,46 @@ research.MapPost("/runs/{runId:guid}/reviews", (Guid runId, JsonObject? body, Re
 }));
 
 // ADR-0015 step 4: read-only exports from one snapshot.
-research.MapGet("/runs/{runId:guid}/export", (Guid runId, string? format, HttpContext context, ResearchReads reads) => Execute(() =>
+research.MapGet("/runs/{runId:guid}/export", (Guid runId, string? format, HttpContext context, ResearchReads reads, ExportLog exports) => Execute(() =>
 {
-    if (format is not ("jsonl" or "csv")) return Results.BadRequest(new { error = "format must be jsonl or csv." });
-    if (reads.Export(runId) is not { } records) return NotFound();
+    // ADR-0017: each request is recorded first, whatever its outcome.
+    if (format is not ("jsonl" or "csv"))
+    {
+        exports.Record(runId, format, "invalid_format");
+        return Results.BadRequest(new { error = "format must be jsonl or csv." });
+    }
+    if (reads.Export(runId) is not { } records)
+    {
+        exports.Record(runId, format, "not_found");
+        return NotFound();
+    }
+    exports.Record(runId, format, "served");
     context.Response.Headers.CacheControl = "no-store";
     context.Response.Headers.ContentDisposition = $"attachment; filename=\"finmind-run-{runId}.{format}\"";
     return format == "jsonl"
         ? Results.Text(RunExport.Jsonl(records), "application/x-ndjson; charset=utf-8")
         : Results.Text(RunExport.PostingsCsv(records), "text/csv; charset=utf-8");
 }, isRead: true));
+
+// ADR-0017 step 2: the operator switch and the export record.
+object SwitchView(OperatorState state, IReadOnlyList<OperatorSwitchEntry> history) => new
+{
+    stopped = state.Stopped, reason = state.Reason, since = state.Since,
+    history = history.Select(h => new { action = h.Action, reason = h.Reason, cancelledRuns = h.CancelledRuns, at = h.At })
+};
+research.MapGet("/admin/status", (PostgresLedger ledger) =>
+    Execute(() => Results.Ok(SwitchView(ledger.GetOperatorState(), ledger.OperatorHistory(20))), isRead: true));
+research.MapPost("/admin/stop", (AdminReasonRequest? request, PostgresLedger ledger) => Execute(() =>
+{
+    var result = ledger.StopAll(request?.Reason, FinanceEvents.InternalApiSource);
+    return Results.Ok(new { stopped = true, reason = result.State.Reason, since = result.State.Since, cancelledRunIds = result.CancelledRunIds });
+}));
+research.MapPost("/admin/resume", (AdminReasonRequest? request, PostgresLedger ledger) =>
+    Execute(() => Results.Ok(SwitchView(ledger.ResumeAll(request?.Reason, FinanceEvents.InternalApiSource), ledger.OperatorHistory(20)))));
+research.MapGet("/admin/exports", (int? limit, ExportLog exports) => Execute(() => Results.Ok(new
+{
+    exports = exports.Latest(limit ?? 100).Select(e => new { runId = e.RunId, format = e.Format, outcome = e.Outcome, at = e.At })
+}), isRead: true));
 
 // ADR-0015 step 5b: finished research runs that still have review candidates, newest first.
 research.MapGet("/reviews/pending", (int? limit, ResearchReads reads, ReviewStore reviews) => Execute(() =>
@@ -597,6 +628,7 @@ internal sealed record TransferRequest(string IdempotencyKey, Guid SourceAccount
 internal sealed record SavingsRequest(string IdempotencyKey, Guid CashAccountId, Guid SavingsAccountId, long AmountSen);
 internal sealed record BillPaymentRequest(string IdempotencyKey, Guid CashAccountId, Guid ObligationId);
 internal sealed record CancelRunRequest(string? Reason);
+internal sealed record AdminReasonRequest(string? Reason);
 internal sealed record FinishRunRequest(string? Outcome, string? Reason);
 internal sealed record ReversalRequest(string IdempotencyKey, string Reason);
 internal sealed record CreateObligationRequest(Guid MerchantAccountId, long AmountSen, string InvoiceReference);

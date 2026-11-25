@@ -47,12 +47,14 @@ public enum LedgerReasonCode
     // finance-reasons/v6 (ADR-0012)
     CostBudgetExceeded,
     // finance-reasons/v7 (ADR-0013)
-    DirectWriteNotAllowed
+    DirectWriteNotAllowed,
+    // finance-reasons/v8 (ADR-0017)
+    OperatorStopped
 }
 
 public static class LedgerReasonCodes
 {
-    public const string CatalogVersion = "finance-reasons/v7";
+    public const string CatalogVersion = "finance-reasons/v8";
 
     public static LedgerOutcome OutcomeOf(LedgerReasonCode code) => code switch
     {
@@ -87,7 +89,8 @@ public static class LedgerReasonCodes
             or LedgerReasonCode.InvoiceReferenceConflict
             or LedgerReasonCode.RunPolicyConflict
             or LedgerReasonCode.InvalidRunTransition
-            or LedgerReasonCode.ToolCallIdConflict => LedgerOutcome.Conflict,
+            or LedgerReasonCode.ToolCallIdConflict
+            or LedgerReasonCode.OperatorStopped => LedgerOutcome.Conflict,
         LedgerReasonCode.UnsupportedCapability => LedgerOutcome.UnsupportedCapability,
         LedgerReasonCode.ConcurrentStateChange
             or LedgerReasonCode.LedgerInvariantViolation
@@ -133,6 +136,7 @@ public static class LedgerReasonCodes
         LedgerReasonCode.TokenBudgetExceeded => "TOKEN_BUDGET_EXCEEDED",
         LedgerReasonCode.CostBudgetExceeded => "COST_BUDGET_EXCEEDED",
         LedgerReasonCode.DirectWriteNotAllowed => "DIRECT_WRITE_NOT_ALLOWED",
+        LedgerReasonCode.OperatorStopped => "OPERATOR_STOPPED",
         _ => "INTERNAL_ERROR"
     };
 

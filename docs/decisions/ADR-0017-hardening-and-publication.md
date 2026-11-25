@@ -1,6 +1,6 @@
 # FINMIND ADR 0017: Phase 5, Hardening and Publication
 
-- Status: Accepted 25 November 2026 (step 1 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
+- Status: Accepted 25 November 2026 (steps 1 and 2 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
 - Date: 25 November 2026
 - Scope: threat model review, gap fixes, crash and concurrency checks,
   documentation, sample data, a reproducible demo, and the Phase 5 exit gate
@@ -126,6 +126,29 @@ Each step ends with tests, a report, and a stop for review:
   `tests/test_injection.py` adds it: an agent obeys S07's administrator
   message, the RM6,000 transfer is denied with the run's own limit, and no
   money moves. It passed on the first run; the control already existed.
+
+#### Step 2 as implemented
+
+- Migration 017: `operator_switch_log` and `export_log`, both append-only
+  (the API role can only read and insert), ordered by an identity column.
+- `StopAll`, `ResumeAll`, `GetOperatorState`, and `OperatorHistory` on both
+  ledgers. A stop takes an exclusive PostgreSQL advisory lock, records itself,
+  lists the active runs, and commits; then each run is cancelled with the
+  reason "Operator stop: …". Starts and claims take the same lock shared, so a
+  start either finishes before the stop lists runs or sees the stop. A test
+  races 24 starts against a stop and finds no active run afterwards.
+- While stopped, a start is refused with `OPERATOR_STOPPED` (new in
+  `finance-reasons/v8`, conflict, HTTP 409) and a claim returns nothing.
+  Draft runs are left as they are.
+- Routes: `GET /api/v1/admin/status`, `POST /api/v1/admin/stop`,
+  `POST /api/v1/admin/resume` (a reason is required for both), and
+  `GET /api/v1/admin/exports`. The export route records each request (served,
+  not found, or invalid format) before serving; if recording fails, nothing
+  is served.
+- The app shows "Stop all runs…" under the header and a red notice while
+  stopped, with "Resume runs…"; both ask for a reason.
+- New runs record `finance-reasons/v8`; a comparison of runs from before and
+  after this change lists the catalog version as a metadata difference.
 
 ## Out of scope
 

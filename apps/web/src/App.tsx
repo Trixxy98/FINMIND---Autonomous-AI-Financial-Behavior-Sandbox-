@@ -7,6 +7,7 @@ import { RunScreen } from './screens/RunScreen.js';
 import { BatchesScreen } from './screens/BatchesScreen.js';
 import { CompareScreen } from './screens/CompareScreen.js';
 import { ReviewScreen } from './screens/ReviewScreen.js';
+import { OperatorSwitch } from './components/OperatorSwitch.js';
 
 type View = { name: 'runs' } | { name: 'new'; copied?: { form: RunForm; warnings: string[] } } | { name: 'run'; runId: string }
   | { name: 'batches' } | { name: 'newBatch' } | { name: 'compare'; batchIds: string[] } | { name: 'review' };
@@ -68,6 +69,7 @@ export function App() {
           <button type="button" onClick={() => { setToken(null); setStatus(''); }}>Forget token</button>
         </nav>
       </header>
+      <OperatorSwitch api={api} />
       {view.name === 'runs' && (
         <RunsScreen api={api} onNew={() => setView({ name: 'new' })} onOpen={(runId) => setView({ name: 'run', runId })}
           onCopy={(snapshot) => void copy(snapshot)} />

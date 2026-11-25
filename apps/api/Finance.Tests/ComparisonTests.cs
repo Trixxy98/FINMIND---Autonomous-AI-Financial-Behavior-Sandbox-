@@ -181,6 +181,10 @@ internal sealed class BatchingLedger(PostgresLedger inner, BatchStore store) : I
     public void EnsureDirectWriteAllowed(Guid runId, string operation, JsonObject request) => throw new NotSupportedException();
     public EnvironmentView GetEnvironment(Guid runId) => throw new NotSupportedException();
     public RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset now, DateTimeOffset expiresAt) => throw new NotSupportedException();
+    public OperatorStopResult StopAll(string? reason, string source) => throw new NotSupportedException();
+    public OperatorState ResumeAll(string? reason, string source) => throw new NotSupportedException();
+    public OperatorState GetOperatorState() => inner.GetOperatorState();
+    public IReadOnlyList<OperatorSwitchEntry> OperatorHistory(int limit) => inner.OperatorHistory(limit);
     public int FailRunsWithExpiredSessions(DateTimeOffset now) => throw new NotSupportedException();
     public Guid? FindSession(byte[] tokenHash) => throw new NotSupportedException();
     public ModelReservationResult ReserveModelCall(Guid runId, ModelReservation reservation) => throw new NotSupportedException();

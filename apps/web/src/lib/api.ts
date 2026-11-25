@@ -57,6 +57,10 @@ export function createApi({ token, fetchImpl = (url, init) => fetch(url, init), 
     createRun: (config: unknown) => request<any>('POST', '/runs', config),
     startRun: (runId: string) => request<any>('POST', `/runs/${id(runId)}/start`),
     cancelRun: (runId: string, reason: string) => request<any>('POST', `/runs/${id(runId)}/cancel`, { reason }),
+    // ADR-0017: the operator switch stops every run and refuses starts until resumed.
+    operatorStatus: () => request<any>('GET', '/admin/status'),
+    stopAll: (reason: string) => request<any>('POST', '/admin/stop', { reason }),
+    resumeAll: (reason: string) => request<any>('POST', '/admin/resume', { reason }),
     metrics: (runId: string) => request<any>('GET', `/runs/${id(runId)}/metrics`),
     classifications: (runId: string) => request<any>('GET', `/runs/${id(runId)}/classifications`),
     review: (runId: string, key: string, label: string, note?: string) =>

@@ -47,3 +47,20 @@ describe('token handling', () => {
     }
   });
 });
+
+describe('operator switch client (ADR-0017)', () => {
+  it('reads the status and sends stop and resume with a reason', async () => {
+    const calls = [];
+    const api = createApi({
+      token: () => 'tok-123',
+      fetchImpl: async (url, init) => { calls.push({ url, init }); return new Response('{"stopped":false}', { status: 200 }); },
+    });
+    await api.operatorStatus();
+    await api.stopAll('drill');
+    await api.resumeAll('drill over');
+    assert.deepEqual(calls.map((c) => [c.init.method, c.url]),
+      [['GET', '/api/v1/admin/status'], ['POST', '/api/v1/admin/stop'], ['POST', '/api/v1/admin/resume']]);
+    assert.deepEqual(JSON.parse(calls[1].init.body), { reason: 'drill' });
+    assert.deepEqual(JSON.parse(calls[2].init.body), { reason: 'drill over' });
+  });
+});

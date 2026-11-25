@@ -222,26 +222,36 @@ a container with an egress proxy if the sandbox is ever shared.
 
 ### O5. Stopping everything, and recovering from crashes
 
-Runs can be cancelled one by one; expired claims are reclaimed; a lost
-response is recovered by its idempotency key.
+Runs can be cancelled one by one, or all at once with the operator stop
+(`POST /api/v1/admin/stop`, with a reason), which also refuses starts and
+claims until resumed. Expired claims are reclaimed; a lost response is
+recovered by its idempotency key.
 
 - `apps/api/Finance.Tests/RecoveryTests.cs::lost_claim_is_reclaimed_after_expiry`
 - `apps/api/Finance.Tests/RecoveryTests.cs::running_run_with_expired_session_is_failed`
 - `apps/api/Finance.Tests/ToolCallTruthTests.cs::cancel_between_the_check_and_the_ledger`
 - `services/agent-runtime/tests/test_end_to_end.py::test_cancellation_stops_money_movement`
+- `apps/api/Finance.Tests/OperatorStopTests.cs::stop_cancels_active_runs_and_refuses_starts_and_claims`
+- `apps/api/Finance.Tests/OperatorStopTests.cs::Postgres_starts_racing_a_stop_leave_no_active_run`
+- `services/agent-runtime/tests/test_operator_api.py::test_stop_cancels_runs_and_refuses_starts_and_claims_until_resumed`
 
-Remaining: no switch stops every run at once (ADR-0017 step 2), and crash
-recovery is not yet tested with real processes being killed (step 3).
+Remaining: crash recovery is not yet tested with real processes being killed
+(ADR-0017 step 3). A model request already sent when the stop arrives still
+completes and its cost is recorded.
 
 ### O6. Export access
 
 Exports need the researcher token and contain no secrets. CSV text cannot be
-read as a spreadsheet formula.
+read as a spreadsheet formula. Every export request is recorded (run, format,
+outcome, time) in an append-only table before anything is served.
 
 - `apps/api/Finance.Tests/ExportTests.cs::Csv_text_cells_are_quoted_and_never_formulas`
 - `services/agent-runtime/tests/test_export_api.py::test_header_states_versions_and_redaction`
+- `services/agent-runtime/tests/test_operator_api.py::test_every_export_request_is_recorded_with_its_outcome`
+- `apps/api/Finance.Tests/OperatorStopTests.cs::Postgres_api_role_cannot_change_or_delete_the_switch_history`
 
-Remaining: exports are not recorded (ADR-0017 step 2).
+Remaining: the record says what was requested, not who requested it; there is
+one researcher token. A copy of an export, once saved, is outside the record.
 
 ### O7. Hostile or malformed input
 
@@ -260,3 +270,4 @@ Remaining: none known.
 | Date | Change |
 |---|---|
 | 25 November 2026 | Version 1. Added the T1 end-to-end test. Open: O4 accepted; O5 and O6 in ADR-0017 steps 2 and 3 |
+| 25 November 2026 | O5: operator stop added. O6: export record added (migration 017) |

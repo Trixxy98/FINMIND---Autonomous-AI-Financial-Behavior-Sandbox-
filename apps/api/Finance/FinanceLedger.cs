@@ -49,6 +49,11 @@ public interface IFinanceLedger
 
     // ADR-0009 gateway support. Token hashes are SHA-256 of the session token; tokens are never stored.
     RunInfo? ClaimQueuedRun(byte[] tokenHash, DateTimeOffset now, DateTimeOffset expiresAt);
+    // ADR-0017: stop every active run and refuse starts and claims until resumed.
+    OperatorStopResult StopAll(string? reason, string source);
+    OperatorState ResumeAll(string? reason, string source);
+    OperatorState GetOperatorState();
+    IReadOnlyList<OperatorSwitchEntry> OperatorHistory(int limit);
     int FailRunsWithExpiredSessions(DateTimeOffset now);
     // Any session ever issued, revoked or not. Only for reporting usage of a call that was already paid for.
     Guid? FindSession(byte[] tokenHash);
@@ -198,6 +203,8 @@ public sealed class InMemoryLedger : IFinanceLedger
     private readonly Dictionary<(Guid RunId, string InvoiceReference), Guid> _obligationIdsByInvoice = [];
     private readonly Dictionary<Guid, long> _runTransactionLimits = [];
     private readonly Dictionary<Guid, List<RunEvent>> _events = [];
+    private readonly List<OperatorSwitchEntry> _switchLog = [];
+    private bool Stopped => _switchLog.Count > 0 && _switchLog[^1].Action == "stop";
     private List<PendingEvent>? _pending;
     private readonly Dictionary<Guid, ManagedRun> _managedRuns = [];
     private readonly Dictionary<string, (Guid RunId, DateTimeOffset ExpiresAt, bool Revoked)> _sessions = [];
@@ -759,6 +766,7 @@ public sealed class InMemoryLedger : IFinanceLedger
                 RunLifecycle.EnsureTransition(from, to);
                 if (to == RunStatus.Running)
                     throw new IdempotencyConflictException(LedgerReasonCode.InvalidRunTransition, "Runs enter RUNNING only through activation.");
+                if (to == RunStatus.Queued && Stopped) throw OperatorSwitch.Refusal();
                 SetStatus(runId, to, storedReason);
                 if (AgentGatewayRules.IsTerminal(to)) RevokeSessions(runId);
                 Emit(FinanceEvents.RunStatusChanged(FinanceEvents.Operations.TransitionRun, from!.Value, to, storedReason, source));
@@ -898,6 +906,7 @@ public sealed class InMemoryLedger : IFinanceLedger
     {
         lock (_gate)
         {
+            if (Stopped) return null;
             Guid? Oldest(Func<KeyValuePair<Guid, ManagedRun>, bool> match) => _managedRuns.Where(match)
                 .OrderBy(r => r.Value.QueuedAt).ThenBy(r => r.Key).Select(r => (Guid?)r.Key).FirstOrDefault();
 
@@ -913,6 +922,42 @@ public sealed class InMemoryLedger : IFinanceLedger
                     RunStatus.Initializing, null, FinanceEvents.WorkerSource));
             return GetRun(runId);
         }
+    }
+
+    public OperatorStopResult StopAll(string? reason, string source)
+    {
+        var stored = OperatorSwitch.Reason(reason, "stop runs");
+        lock (_gate)
+        {
+            var active = _managedRuns.Where(r => r.Value.Status is RunStatus.Queued or RunStatus.Initializing or RunStatus.Running)
+                .Select(r => r.Key).ToArray();
+            foreach (var run in active) TransitionRun(run, RunStatus.Cancelled, OperatorSwitch.CancellationReason(stored), source);
+            _switchLog.Add(new OperatorSwitchEntry("stop", stored, source, active.Length, _time.GetUtcNow()));
+            return new OperatorStopResult(GetOperatorState(), active);
+        }
+    }
+
+    public OperatorState ResumeAll(string? reason, string source)
+    {
+        var stored = OperatorSwitch.Reason(reason, "resume runs");
+        lock (_gate)
+        {
+            _switchLog.Add(new OperatorSwitchEntry("resume", stored, source, 0, _time.GetUtcNow()));
+            return GetOperatorState();
+        }
+    }
+
+    public OperatorState GetOperatorState()
+    {
+        lock (_gate)
+            return _switchLog.Count == 0 ? new OperatorState(false, null, null)
+                : new OperatorState(Stopped, _switchLog[^1].Reason, _switchLog[^1].At);
+    }
+
+    public IReadOnlyList<OperatorSwitchEntry> OperatorHistory(int limit)
+    {
+        lock (_gate)
+            return _switchLog.AsEnumerable().Reverse().Take(Math.Clamp(limit, 1, 500)).ToArray();
     }
 
     private bool HasExpiredSession(Guid runId, DateTimeOffset now) =>
