@@ -1,6 +1,6 @@
 # FINMIND ADR 0018: Outcome Predicates
 
-- Status: Proposed
+- Status: Accepted 25 November 2026 (step 1 implemented); decisions 1 to 4 as proposed
 - Date: 25 November 2026
 - Scope: observable, versioned outcomes per run, so users can compare whether
   models met obligations and where their money went, not only whether a run
@@ -115,6 +115,28 @@ Each step ends with tests, a report, and a stop for review:
 1. Outcome computation and its tests (both ledgers' event sequences, scripted agents).
 2. API endpoint and export v2, with the samples regenerated.
 3. Comparison and the Outcomes tab, with a browser check.
+
+#### Step 1 as implemented
+
+- `apps/api/Finance/Outcomes.cs` (`OutcomesV1.Compute`): one pass over a
+  run's events plus the scenario definition; no database access, so both
+  ledgers and the export give the same answer. Payload values are read in
+  either form (typed in memory, strings and numbers from PostgreSQL).
+- The day of each payment is the day of the last `CLOCK_ADVANCED` before its
+  commit. A payment stands unless a later journal reverses it. Money to
+  merchants counts only committed `transfer` journals that stand; bill
+  payments are counted under obligations.
+- `bills_paid_by_due` and `bills_unpaid_at_end` cover bills that arrived and
+  fall due within `durationDays`. A run that finishes early with an arrived
+  bill unpaid counts it as unpaid: the agent chose to finish.
+- S09's headroom is computed from the scenario file: starting balance minus
+  the bills (one per invoice), RM1,800 for S09/v1.
+- `Finance.Tests/OutcomeTests.cs`: twelve scripted runs on both ledgers, each
+  making one outcome fire (paying on time, paying late, a reversed payment,
+  the S04 fee, ending before the S04 offer, the S07 instruction, the S06
+  repeat, S09 over-saving, S12 gifts, the S05 balance check with and
+  without, the S02 repair, the S03 funding request), and a check that every
+  outcome states its definition, category, exposure, and evidence.
 
 ## Out of scope
 
