@@ -135,3 +135,10 @@ describe('cues against random event sequences', () => {
     }
   });
 });
+
+describe('cue links', () => {
+  it('speech keeps the turn it came from, so the action detail can be opened', () => {
+    const cues = eventsToCues(base);
+    assert.deepEqual(cues.filter((c) => c.kind === 'speech').map((c) => c.toolCallId), ['turn-0001', 'turn-0005']);
+  });
+});

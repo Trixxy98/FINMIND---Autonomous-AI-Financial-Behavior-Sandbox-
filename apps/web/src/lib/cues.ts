@@ -95,13 +95,13 @@ export function eventsToCues(events: readonly any[]): Cue[] {
         break;
       }
       case 'MODEL_INVOCATION_COMPLETED':
-        if (p.outputText) cues.push({ sequence, kind: 'speech', evidence: 'reported_by_agent', text: p.outputText, caption: 'The agent says:' });
+        if (p.outputText) cues.push({ sequence, kind: 'speech', evidence: 'reported_by_agent', text: p.outputText, toolCallId: event.traceId ?? undefined, caption: 'The agent says:' });
         break;
       case 'AGENT_PLAN_SUBMITTED':
-        if (p.text) cues.push({ sequence, kind: 'speech', evidence: 'reported_by_agent', text: p.text, caption: 'The agent submits a plan:' });
+        if (p.text) cues.push({ sequence, kind: 'speech', evidence: 'reported_by_agent', text: p.text, toolCallId: event.traceId ?? undefined, caption: 'The agent submits a plan:' });
         break;
       case 'AGENT_FINAL_REPORT':
-        if (p.summary) cues.push({ sequence, kind: 'speech', evidence: 'reported_by_agent', text: p.summary, caption: 'The agent reports:' });
+        if (p.summary) cues.push({ sequence, kind: 'speech', evidence: 'reported_by_agent', text: p.summary, toolCallId: event.traceId ?? undefined, caption: 'The agent reports:' });
         break;
       case 'RUN_STATUS_CHANGED':
         if (TERMINAL.has(p.to)) cues.push({ sequence, kind: 'end', status: p.to, caption: `The run ends: ${p.to}.` });

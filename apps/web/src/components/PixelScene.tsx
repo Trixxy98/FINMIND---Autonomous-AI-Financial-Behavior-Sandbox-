@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useReducer, useState } from 'react';
 import { eventsToCues, type Cue } from '../lib/cues.js';
 import { SCENE, placePosition, sceneAt } from '../lib/scene.js';
 import { SPRITES, spriteRects } from '../lib/sprites.js';
 import { formatSen } from '../lib/money.js';
 import { EvidenceBadge } from './EvidenceBadge.js';
+import { SPEEDS, initialPlayback, playback, stepDelayMs } from '../lib/playback.js';
 
 const P = SCENE.pixel;
 
@@ -16,8 +17,8 @@ function Sprite({ name, x, y, scale = P, title }: { name: string; x: number; y: 
   );
 }
 
-function Label({ x, y, text }: { x: number; y: number; text: string }) {
-  return <text x={x} y={y} fontSize={10} fontFamily="system-ui" fill="#2b2d42">{text.length > 16 ? `${text.slice(0, 15)}…` : text}</text>;
+function Label({ x, y, text, max = 16 }: { x: number; y: number; text: string; max?: number }) {
+  return <text x={x} y={y} fontSize={10} fontFamily="system-ui" fill="#2b2d42">{text.length > max ? `${text.slice(0, max - 1)}…` : text}<title>{text}</title></text>;
 }
 
 const PLACES: { place: string; sprite: string; label: string }[] = [
@@ -30,7 +31,8 @@ const PLACES: { place: string; sprite: string; label: string }[] = [
 ];
 
 // ADR-0016: a picture of what was recorded. Figures come from replay; the timeline stays beside it.
-export function SceneView({ events, cues, sequence }: { events: readonly any[]; cues: readonly Cue[]; sequence: number }) {
+export function SceneView({ events, cues, sequence, reducedMotion }:
+  { events: readonly any[]; cues: readonly Cue[]; sequence: number; reducedMotion: boolean }) {
   const scene = useMemo(() => sceneAt(events, cues, sequence), [events, cues, sequence]);
   const merchantPlaces = scene.merchants.map((m) => m.place);
   const at = (place: string) => placePosition(place, merchantPlaces);
@@ -50,23 +52,33 @@ export function SceneView({ events, cues, sequence }: { events: readonly any[]; 
           <g><rect x={x} y={y} width={18} height={21} fill="none" stroke="#e03131" strokeDasharray="3 2" />
             <Label x={x - 10} y={y - 4} text="No such door" /></g>); })()}
         {scene.merchants.map((m) => { const { x, y } = at(m.place); return (
-          <g key={m.place}><Sprite name="stall" x={x} y={y} /><Label x={x} y={y + 34} text={m.label.replace(' (synthetic)', '')} /></g>); })}
+          <g key={m.place}><Sprite name="stall" x={x} y={y} /><Label x={x} y={y + 34} text={m.label.replace(' (synthetic)', '')} max={11} /></g>); })}
         {(cue?.kind === 'bill' || cue?.kind === 'message') && <Sprite name="letter" x={at('mailbox').x + 2} y={at('mailbox').y - 18} />}
         {cue?.kind === 'letter' && <Sprite name="letter" x={at('postbox').x + 2} y={at('postbox').y - 18} />}
         {cue?.kind === 'coins' && cue.from && cue.to && (() => {
           const a = at(cue.from), b = at(cue.to);
-          return <Sprite name="coin" x={(a.x + b.x) / 2} y={Math.min(a.y, b.y) - 20} title={cue.caption} />;
+          // The coin travels from one account to the other; with reduced motion it is drawn at the destination.
+          return (
+            <g key={cue.sequence} transform={`translate(${b.x + 8} ${b.y - 20})`}>
+              {!reducedMotion && <animateTransform attributeName="transform" type="translate" dur="0.7s" fill="freeze"
+                from={`${a.x + 8} ${a.y - 20}`} to={`${b.x + 8} ${b.y - 20}`} />}
+              <Sprite name="coin" x={0} y={0} title={cue.caption} />
+            </g>);
         })()}
-        <Sprite name="avatar" x={avatar.x + 4} y={avatar.y + 30} title="The agent" />
+        <g style={{ transform: `translate(${avatar.x + 4}px, ${avatar.y + 30}px)`, transition: reducedMotion ? 'none' : 'transform 0.5s ease-in-out' }}>
+          <Sprite name="avatar" x={0} y={0} title="The agent" />
+        </g>
         {(cue?.kind === 'blocked' || cue?.kind === 'missing_door') && (
           <text x={avatar.x + 2} y={avatar.y + 26} fontSize={12} fontWeight={700} fill="#e03131">DENIED</text>
         )}
         {cue?.kind === 'speech' && (
           <g>
-            <rect x={Math.min(avatar.x, SCENE.width - 260)} y={avatar.y - 30} width={250} height={34} rx={4} fill="#fff9db" stroke="#f59f00" />
-            <text x={Math.min(avatar.x, SCENE.width - 260) + 6} y={avatar.y - 16} fontSize={9} fontWeight={700} fill="#7a4f01">REPORTED BY AGENT</text>
-            <text x={Math.min(avatar.x, SCENE.width - 260) + 6} y={avatar.y - 4} fontSize={10} fill="#2b2d42">
-              {(cue.text ?? '').length > 46 ? `${cue.text!.slice(0, 45)}…` : cue.text}
+            {/* Above the buildings, with a pointer down to the avatar, so it never hides a place. */}
+            <line x1={avatar.x + 16} y1={124} x2={avatar.x + 16} y2={avatar.y + 26} stroke="#f59f00" strokeDasharray="2 2" />
+            <rect x={Math.max(10, Math.min(avatar.x - 120, SCENE.width - 410))} y={90} width={400} height={34} rx={4} fill="#fff9db" stroke="#f59f00" />
+            <text x={Math.max(10, Math.min(avatar.x - 120, SCENE.width - 410)) + 6} y={104} fontSize={9} fontWeight={700} fill="#7a4f01">REPORTED BY AGENT</text>
+            <text x={Math.max(10, Math.min(avatar.x - 120, SCENE.width - 410)) + 6} y={117} fontSize={10} fill="#2b2d42">
+              {(cue.text ?? '').length > 72 ? `${cue.text!.slice(0, 71)}…` : cue.text}
             </text>
           </g>
         )}
@@ -84,24 +96,85 @@ export function SceneView({ events, cues, sequence }: { events: readonly any[]; 
   );
 }
 
-// Step 2: stepping cue by cue. Playback and live following arrive in step 3.
-export function ScenePanel({ events }: { events: readonly any[] }) {
+function usePrefersReducedMotion() {
+  const query = useMemo(() => (typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null), []);
+  const [reduced, setReduced] = useState(query?.matches ?? false);
+  useEffect(() => {
+    if (!query) return;
+    const update = () => setReduced(query.matches);
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, [query]);
+  return reduced;
+}
+
+// Replay and live playback. The timeline, action detail, and ledger inspector stay one click away.
+export function ScenePanel({ events, running, onOpenAction, onOpenLedger }: {
+  events: readonly any[]; running: boolean; onOpenAction: (toolCallId: string) => void; onOpenLedger: () => void;
+}) {
   const cues = useMemo(() => eventsToCues(events), [events]);
-  const [index, setIndex] = useState(cues.length - 1);
-  const current = cues[Math.max(0, Math.min(index, cues.length - 1))];
+  const reducedMotion = usePrefersReducedMotion();
+  const [state, dispatch] = useReducer(playback, undefined, () => initialPlayback(cues.length, running));
+  const length = cues.length;
+
+  useEffect(() => { if (!running) dispatch({ type: 'ended' }); }, [running]);
+  useEffect(() => {
+    if (!state.playing) return;
+    const timer = setTimeout(() => dispatch({ type: 'tick', length }), stepDelayMs(state.speed));
+    return () => clearTimeout(timer);
+  }, [state.playing, state.index, state.speed, length]);
+
+  const index = Math.min(state.index, Math.max(0, length - 1));
+  const current = cues[index];
   if (!current) return <p>Nothing recorded yet.</p>;
+  const nearby = cues.slice(Math.max(0, index - 6), index + 1);
+
   return (
     <div>
-      <p style={{ fontSize: 12, color: '#5f6368' }}>A picture of the recorded events ({cues.length} cues, finmind-cues/v1). Coins move
-        only for ledger commits; the agent's words are its own. The action list and ledger inspector remain the record.</p>
+      <p style={{ fontSize: 12, color: '#5f6368' }}>A picture of the recorded events ({length} cues, finmind-cues/v1). Coins move
+        only for ledger commits; the agent's words are its own. The action list and ledger inspector remain the record.
+        {reducedMotion && ' Reduced motion is on: positions change without animation.'}</p>
       <p>
-        <button type="button" onClick={() => setIndex(0)}>Start</button>{' '}
-        <button type="button" onClick={() => setIndex((i) => Math.max(0, i - 1))}>◀ Cue</button>{' '}
-        <button type="button" onClick={() => setIndex((i) => Math.min(cues.length - 1, i + 1))}>Cue ▶</button>{' '}
-        <button type="button" onClick={() => setIndex(cues.length - 1)}>End</button>{' '}
-        cue {Math.min(index, cues.length - 1) + 1} of {cues.length}
+        <button type="button" onClick={() => dispatch({ type: 'start' })}>Start</button>{' '}
+        <button type="button" onClick={() => dispatch({ type: 'back', length })}>◀ Cue</button>{' '}
+        {state.playing
+          ? <button type="button" onClick={() => dispatch({ type: 'pause' })}>Pause</button>
+          : <button type="button" onClick={() => dispatch({ type: 'play', length })}>Play</button>}{' '}
+        <button type="button" onClick={() => dispatch({ type: 'forward', length })}>Cue ▶</button>{' '}
+        {running && <button type="button" aria-pressed={state.live} onClick={() => dispatch({ type: 'live', length })}>Follow live</button>}{' '}
+        <label>Speed{' '}
+          <select value={state.speed} onChange={(e) => dispatch({ type: 'speed', speed: Number(e.target.value) })}>
+            {SPEEDS.map((speed) => <option key={speed} value={speed}>{speed}×</option>)}
+          </select>
+        </label>{' '}
+        <input type="range" aria-label="Cue position" min={0} max={length - 1} value={index}
+          onChange={(e) => dispatch({ type: 'seek', index: Number(e.target.value), length })} style={{ width: 220, verticalAlign: 'middle' }} />{' '}
+        cue {index + 1} of {length}{state.live ? ' · following live' : ''}
       </p>
-      <SceneView events={events} cues={cues} sequence={current.sequence} />
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+        <div style={{ flex: '3 1 480px' }}>
+          <SceneView events={events} cues={cues} sequence={current.sequence} reducedMotion={reducedMotion} />
+        </div>
+        <aside style={{ flex: '1 1 220px', fontSize: 13 }} aria-label="Timeline">
+          <strong>Timeline</strong>
+          <ol style={{ paddingLeft: 18, margin: '4px 0' }}>
+            {nearby.map((cue) => {
+              const at = cues.indexOf(cue);
+              return (
+                <li key={cue.sequence} value={cue.sequence} style={{ fontWeight: at === index ? 700 : 400 }}>
+                  <button type="button" onClick={() => dispatch({ type: 'seek', index: at, length })}
+                    style={{ all: 'unset', cursor: 'pointer' }}>
+                    {cue.evidence && <EvidenceBadge value={cue.evidence} />} {cue.caption}
+                  </button>
+                </li>);
+            })}
+          </ol>
+          <p style={{ margin: '6px 0' }}>
+            {current.toolCallId && <><button type="button" onClick={() => onOpenAction(current.toolCallId!)}>Action detail</button>{' '}</>}
+            <button type="button" onClick={onOpenLedger}>Ledger inspector</button>
+          </p>
+        </aside>
+      </div>
     </div>
   );
 }

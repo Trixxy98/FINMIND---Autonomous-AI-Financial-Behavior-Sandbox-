@@ -20,7 +20,7 @@ export function placePosition(place: Place, merchants: readonly string[]): { x: 
   if (place === 'wallet') return FIXED.home;
   if (FIXED[place]) return FIXED[place];
   const index = merchants.indexOf(place);
-  return { x: 30 + Math.max(index, 0) * 72, y: 295 };
+  return { x: 20 + Math.max(index, 0) * 76, y: 295 };
 }
 
 export interface SceneState {

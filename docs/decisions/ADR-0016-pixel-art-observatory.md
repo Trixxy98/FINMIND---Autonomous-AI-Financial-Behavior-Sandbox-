@@ -1,6 +1,6 @@
 # FINMIND ADR 0016: Pixel-art Observatory View
 
-- Status: Accepted 25 November 2026 (steps 1 and 2 implemented)
+- Status: Accepted 25 November 2026 (steps 1 to 3 implemented)
 - Date: 25 November 2026
 - Scope: an optional animated view of one run, driven only by recorded events
 
@@ -107,6 +107,29 @@ Each step ends with tests, a report, and a stop for review:
   under the picture. Playback, live following, and reduced motion are step 3.
 - The message cue shows a letter at the mailbox; the sender is in the caption
   only through the event key, since message payloads are not read here.
+
+#### Step 3 as implemented
+
+- `apps/web/src/lib/playback.ts`: a pure reducer for start, back, play,
+  pause, forward, seek, speed (0.5× to 4×), and live. A finished run opens
+  paused at the last cue; play from the end starts again. A running run opens
+  following live: it steps one cue at a time, waits at the newest, and pauses
+  after the run ends. Stepping or pausing stops following.
+- The avatar walks with a CSS transition; a coin travels from one account to
+  the other with an SVG animation. With `prefers-reduced-motion`, neither
+  animates, the coin is drawn at its destination, and the panel says so.
+- A timeline of the latest cues sits beside the scene, each one a seek link,
+  with buttons for the action detail (any cue with a tool call, speech
+  included) and the ledger inspector.
+- The agent's speech bubble sits above the buildings with a pointer to the
+  avatar, so it never hides a place; merchant names are shortened on the
+  scene and given in full on hover.
+- Checked in Chrome against the test database with a mock adversarial run on
+  S07: live following, play and pause, a coin moving on a commit, DENIED with
+  no coin for a capability that does not exist, the action detail link, reduced
+  motion, and figures at the last cue equal to the ledger wallets.
+- Live following shows every cue, so at 1× it can fall behind a fast run; a
+  higher speed catches up.
 
 ## Acceptance tests
 

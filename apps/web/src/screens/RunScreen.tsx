@@ -259,7 +259,10 @@ export function RunScreen({ api, token, runId, onBack, onUnauthorized }: Props) 
 
       {tab === 'review' && <ClassificationsPanel api={api} runId={runId} />}
       {tab === 'replay' && <ReplayPanel key={events.length} events={events} wallets={wallets} />}
-      {tab === 'scene' && <ScenePanel key={events.length} events={events} />}
+      {tab === 'scene' && (
+        <ScenePanel events={events} running={!isTerminal(run.status)}
+          onOpenAction={(toolCallId) => { setSelected(toolCallId); setTab('actions'); }} onOpenLedger={() => void openLedger()} />
+      )}
 
       {tab === 'metrics' && (metrics ? <MetricsPanel metrics={metrics} /> : <p>Loading metrics…</p>)}
 
