@@ -1,6 +1,6 @@
 # FINMIND ADR 0015: Research Workflows (Phase 4)
 
-- Status: Accepted 24 November 2026 (steps 1 to 4 implemented)
+- Status: Accepted 24 November 2026 (steps 1 to 4 and 5a implemented)
 - Date: 24 November 2026
 - Scope: versioned metrics, replicated batches and comparison, rule-based
   classification with human review, export, read-only replay, and further
@@ -164,6 +164,23 @@ writes. It reconstructs what was recorded and does not rerun a model.
 - CSV text cells are quoted as needed and never start like a spreadsheet
   formula; amounts stay plain integers in sen.
 - No file is written on the server: the response is the export.
+
+#### Step 5a as implemented
+
+- Screens: Batches (list, details, start order and order seed, choose 2 to
+  6 to compare), New batch (the New run form with a count, an optional seed
+  list, and a label), Comparison (what differs first, then n, mean, range,
+  standard deviation, and interval per group, with raw values per run), and
+  a Metrics tab and export buttons on the Run screen.
+- A mean in sen is shown rounded to the sen with integer arithmetic and
+  marked "≈" when rounding changed it. Spreads are shown as approximate.
+- Found in the browser check: the comparison warned that scenario version
+  and hash differ whenever the scenarios differ, although the scenario is
+  already the named factor. Version and hash are now a warning only when one
+  scenario ID has more than one of them.
+- Export buttons fetch with the Authorization header and save a blob. They
+  were not pressed in the browser check, because that downloads a file; the
+  client is covered by a unit test.
 
 ## Delivery
 

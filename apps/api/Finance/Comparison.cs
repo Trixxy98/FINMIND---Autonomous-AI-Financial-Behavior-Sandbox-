@@ -23,6 +23,8 @@ public static class Comparison
         "maxModelTokens", "maxWallTimeSeconds", "maxCostMicroUsd", "memoryMode", "describeUnavailableCapabilities"
     ];
 
+    private static readonly HashSet<string> ScenarioBound = ["scenarioVersion", "scenarioHash"];
+
     public static readonly string[] MetadataFields =
     [
         "configSchemaVersion", "scenarioVersion", "scenarioHash", "toolsetVersion", "policyVersion", "reasonCodeCatalog",
@@ -118,8 +120,15 @@ public static class Comparison
         var between = names.Where(name => research.Where(g => g.Count > 0).Select(g => Values(g, name)).ToList() is var sets
             && sets.SelectMany((a, i) => sets.Skip(i + 1).Select(b => !a.Overlaps(b))).Any(disjoint => disjoint)).ToList();
         var within = research.Select(g => new JsonArray(names.Where(name => Values(g, name).Count > 1).Select(n => (JsonNode)n).ToArray()));
-        var metadata = groups.SelectMany(g => g).Select(s => Fields(s, MetadataFields)).ToList();
-        var metadataDiffers = MetadataFields.Where(name => metadata.Select(f => f[name]).Distinct().Count() > 1);
+        var runs = groups.SelectMany(g => g).ToList();
+        var metadata = runs.Select(s => Fields(s, MetadataFields)).ToList();
+        var scenarios = runs.Select(s => s["scenarioId"]?.ToJsonString() ?? "null").ToList();
+        // A scenario's version and hash follow its ID. They are a warning only when one scenario ID has more than one.
+        bool Differs(string name) => ScenarioBound.Contains(name)
+            ? metadata.Select((f, i) => (Scenario: scenarios[i], Value: f[name])).GroupBy(x => x.Scenario)
+                .Any(g => g.Select(x => x.Value).Distinct().Count() > 1)
+            : metadata.Select(f => f[name]).Distinct().Count() > 1;
+        var metadataDiffers = MetadataFields.Where(Differs);
         return new JsonObject
         {
             ["betweenGroups"] = new JsonArray(between.Select(n => (JsonNode)n).ToArray()),

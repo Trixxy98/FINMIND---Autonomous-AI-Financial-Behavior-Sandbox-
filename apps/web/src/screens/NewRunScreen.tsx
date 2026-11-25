@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { ApiError, type Api } from '../lib/api.js';
+import { batchRequest } from '../lib/analysis.js';
 import { formatSen } from '../lib/money.js';
 import {
   EFFORTS, buildConfig, defaultForm, formatMicroUsd, isPaid, parseUsdToMicro, validateForm,
@@ -8,6 +9,8 @@ import {
 
 interface Props {
   api: Api;
+  // ADR-0015: the same form creates a batch of replications.
+  batch?: boolean;
   copied?: { form: RunForm; warnings: string[] };
   onCreated: (runId: string) => void;
   onCancel: () => void;
@@ -20,7 +23,7 @@ const FIELD_NAMES: Record<string, string> = {
   'agent.settings.maxOutputTokensPerTurn': 'Output tokens per turn',
 };
 
-export function NewRunScreen({ api, copied, onCreated, onCancel }: Props) {
+export function NewRunScreen({ api, batch, copied, onCreated, onCancel }: Props) {
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [models, setModels] = useState<Model[]>([]);
   const [form, setForm] = useState<RunForm | null>(copied?.form ?? null);
@@ -29,6 +32,9 @@ export function NewRunScreen({ api, copied, onCreated, onCancel }: Props) {
   const [message, setMessage] = useState('');
   const [confirmedCost, setConfirmedCost] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [count, setCount] = useState('3');
+  const [seeds, setSeeds] = useState('');
+  const [label, setLabel] = useState('');
 
   useEffect(() => {
     void (async () => {
@@ -54,8 +60,10 @@ export function NewRunScreen({ api, copied, onCreated, onCancel }: Props) {
 
   function review() {
     const found = validateForm(form!);
+    const batchError = batch ? batchRequest({}, count, seeds, label, false).error : undefined;
     setErrors(found);
-    setMessage(found.length ? 'Correct the highlighted fields.' : '');
+    setMessage(found.length ? 'Correct the highlighted fields.' : batchError ?? '');
+    if (batchError) return;
     if (!found.length) { setStep('review'); setConfirmedCost(false); }
   }
 
@@ -63,6 +71,11 @@ export function NewRunScreen({ api, copied, onCreated, onCancel }: Props) {
     setBusy(true);
     setMessage('');
     try {
+      if (batch) {
+        const created = await api.createBatch(batchRequest(buildConfig(form!), count, seeds, label, start).body);
+        onCreated(created.batchId);
+        return;
+      }
       const run = await api.createRun(buildConfig(form!));
       if (start) await api.startRun(run.runId);
       onCreated(run.runId);
@@ -97,7 +110,9 @@ export function NewRunScreen({ api, copied, onCreated, onCancel }: Props) {
     const config = buildConfig(form);
     return (
       <section>
-        <h2>Review new run</h2>
+        <h2>{batch ? 'Review new batch' : 'Review new run'}</h2>
+        {batch && <p><strong>{count} runs</strong>{seeds.trim() ? ` with seeds ${seeds}` : ', same configuration and seed (replications)'}
+          {label.trim() ? `, labelled "${label.trim()}"` : ''}. They start in a recorded random order.</p>}
         <table style={{ fontSize: 14 }}>
           <tbody>
             {[
@@ -134,7 +149,15 @@ export function NewRunScreen({ api, copied, onCreated, onCancel }: Props) {
 
   return (
     <section>
-      <h2>New run</h2>
+      <h2>{batch ? 'New batch' : 'New run'}</h2>
+      {batch && (
+        <p>
+          <label>Runs (1–20) <input style={{ width: 50 }} value={count} onChange={(e) => setCount(e.target.value)} /></label>{' '}
+          <label>Seed list (optional) <input style={{ width: 160 }} placeholder="same seed for all" value={seeds}
+            onChange={(e) => setSeeds(e.target.value)} /></label>{' '}
+          <label>Label <input style={{ width: 200 }} value={label} onChange={(e) => setLabel(e.target.value)} /></label>
+        </p>
+      )}
       {copied?.warnings.map((w) => <p key={w} role="alert" style={{ background: '#fef7e0', padding: 8 }}>{w}</p>)}
       <table style={{ fontSize: 14 }}>
         <tbody>

@@ -57,6 +57,23 @@ export function createApi({ token, fetchImpl = (url, init) => fetch(url, init), 
     createRun: (config: unknown) => request<any>('POST', '/runs', config),
     startRun: (runId: string) => request<any>('POST', `/runs/${id(runId)}/start`),
     cancelRun: (runId: string, reason: string) => request<any>('POST', `/runs/${id(runId)}/cancel`, { reason }),
+    metrics: (runId: string) => request<any>('GET', `/runs/${id(runId)}/metrics`),
+    classifications: (runId: string) => request<any>('GET', `/runs/${id(runId)}/classifications`),
+    review: (runId: string, key: string, label: string, note?: string) =>
+      request<any>('POST', `/runs/${id(runId)}/reviews`, note ? { key, label, note } : { key, label }),
+    listBatches: (limit = 100) => request<any>('GET', `/batches${query({ limit })}`),
+    getBatch: (batchId: string) => request<any>('GET', `/batches/${id(batchId)}`),
+    createBatch: (body: unknown) => request<any>('POST', '/batches', body),
+    compare: (batchIds: string[]) => request<any>('GET', `/compare?${batchIds.map((b) => `batch=${encodeURIComponent(b)}`).join('&')}`),
+    // The file is fetched with the Authorization header and handed to the browser as a blob: no token in a URL.
+    exportRun: async (runId: string, format: 'jsonl' | 'csv') => {
+      const response = await fetchImpl(`${API_BASE}/runs/${id(runId)}/export?format=${format}`, {
+        method: 'GET', credentials: 'omit', cache: 'no-store', headers: { Authorization: `Bearer ${token() ?? ''}` },
+      });
+      if (response.status === 401) onUnauthorized?.();
+      if (!response.ok) throw new ApiError(response.status, undefined);
+      return response.blob();
+    },
     listScenarios: () => request<any>('GET', '/scenarios'),
     listModels: () => request<any>('GET', '/models'),
   };

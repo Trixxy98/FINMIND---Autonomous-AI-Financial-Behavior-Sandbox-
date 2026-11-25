@@ -61,8 +61,18 @@ public sealed class ComparisonTests
         Assert.Equal(["scenarioId"], differences["betweenGroups"]!.AsArray().Select(f => (string)f!));
         Assert.Equal(["seed"], differences["withinGroups"]![1]!.AsArray().Select(f => (string)f!));
         Assert.Empty(differences["withinGroups"]![0]!.AsArray());
-        Assert.Equal(["codeRevision", "scenarioVersion"],
-            differences["metadata"]!.AsArray().Select(f => (string)f!).Order(StringComparer.Ordinal));
+        // scenarioVersion differs only because the scenario differs, which is already named; it is not a warning.
+        Assert.Equal(["codeRevision"], differences["metadata"]!.AsArray().Select(f => (string)f!));
+    }
+
+    [Fact]
+    public void A_scenario_file_that_changed_under_the_same_scenario_is_flagged()
+    {
+        var newer = Snapshot();
+        newer["scenarioVersion"] = "S01/v2";
+        var differences = Comparison.Differences([[Snapshot()], [newer]]);
+        Assert.Empty(differences["betweenGroups"]!.AsArray());
+        Assert.Equal(["scenarioVersion"], differences["metadata"]!.AsArray().Select(f => (string)f!));
     }
 
     [Theory]

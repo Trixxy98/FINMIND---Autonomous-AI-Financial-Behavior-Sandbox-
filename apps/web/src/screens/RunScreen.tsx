@@ -4,9 +4,10 @@ import { formatSen } from '../lib/money.js';
 import { streamRunEvents } from '../lib/sse.js';
 import { budgetLines, isTerminal, modelTextFor, refreshesOn } from '../lib/runView.js';
 import { EvidenceBadge } from '../components/EvidenceBadge.js';
+import { MetricsPanel } from '../components/MetricsPanel.js';
 
 interface Props { api: Api; token: string; runId: string; onBack: () => void; onUnauthorized: () => void }
-type Tab = 'actions' | 'ledger' | 'events';
+type Tab = 'actions' | 'ledger' | 'events' | 'metrics';
 
 const box = { border: '1px solid #ddd', borderRadius: 6, padding: 12, marginBottom: 12 } as const;
 const pre = { background: '#f8f9fa', padding: 8, overflowX: 'auto', fontSize: 12, maxHeight: 300, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } as const;
@@ -42,6 +43,7 @@ export function RunScreen({ api, token, runId, onBack, onUnauthorized }: Props) 
   const [tab, setTab] = useState<Tab>('actions');
   const [streamState, setStreamState] = useState('connecting');
   const [verify, setVerify] = useState<any>(null);
+  const [metrics, setMetrics] = useState<any>(null);
   const [cancelling, setCancelling] = useState(false);
   const [reason, setReason] = useState('');
   const [error, setError] = useState('');
@@ -171,6 +173,21 @@ export function RunScreen({ api, token, runId, onBack, onUnauthorized }: Props) 
         <button type="button" aria-pressed={tab === 'actions'} onClick={() => setTab('actions')}>Actions ({actions.length})</button>
         <button type="button" aria-pressed={tab === 'ledger'} onClick={() => void openLedger()}>Ledger inspector</button>
         <button type="button" aria-pressed={tab === 'events'} onClick={() => setTab('events')}>Events ({events.length})</button>
+        <button type="button" aria-pressed={tab === 'metrics'} onClick={async () => { setTab('metrics'); setMetrics(await api.metrics(runId)); }}>Metrics</button>
+        <span style={{ marginLeft: 'auto' }}>
+          Export:{' '}
+          {(['jsonl', 'csv'] as const).map((format) => (
+            <button key={format} type="button" onClick={async () => {
+              // Fetched with the Authorization header and saved from a blob, so the token never enters a URL.
+              const url = URL.createObjectURL(await api.exportRun(runId, format));
+              const link = document.createElement('a');
+              link.href = url;
+              link.download = `finmind-run-${runId}.${format}`;
+              link.click();
+              URL.revokeObjectURL(url);
+            }}>{format.toUpperCase()}</button>
+          ))}
+        </span>
       </nav>
 
       {tab === 'actions' && (
@@ -233,6 +250,8 @@ export function RunScreen({ api, token, runId, onBack, onUnauthorized }: Props) 
           )}
         </div>
       )}
+
+      {tab === 'metrics' && (metrics ? <MetricsPanel metrics={metrics} /> : <p>Loading metrics…</p>)}
 
       {tab === 'events' && (
         <table style={{ borderCollapse: 'collapse', fontSize: 12, width: '100%' }}>

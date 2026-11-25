@@ -4,8 +4,11 @@ import { formFromSnapshot, type RunForm, type Scenario } from './lib/runForm.js'
 import { RunsScreen } from './screens/RunsScreen.js';
 import { NewRunScreen } from './screens/NewRunScreen.js';
 import { RunScreen } from './screens/RunScreen.js';
+import { BatchesScreen } from './screens/BatchesScreen.js';
+import { CompareScreen } from './screens/CompareScreen.js';
 
-type View = { name: 'runs' } | { name: 'new'; copied?: { form: RunForm; warnings: string[] } } | { name: 'run'; runId: string };
+type View = { name: 'runs' } | { name: 'new'; copied?: { form: RunForm; warnings: string[] } } | { name: 'run'; runId: string }
+  | { name: 'batches' } | { name: 'newBatch' } | { name: 'compare'; batchIds: string[] };
 
 export function App() {
   // The token lives in component state only; reloading the page asks for it again (ADR-0014).
@@ -59,6 +62,7 @@ export function App() {
         <nav style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
           <button type="button" onClick={() => setView({ name: 'runs' })}>Runs</button>
           <button type="button" onClick={() => setView({ name: 'new' })}>New run</button>
+          <button type="button" onClick={() => setView({ name: 'batches' })}>Batches</button>
           <button type="button" onClick={() => { setToken(null); setStatus(''); }}>Forget token</button>
         </nav>
       </header>
@@ -69,6 +73,17 @@ export function App() {
       {view.name === 'new' && (
         <NewRunScreen key={JSON.stringify(view.copied ?? null)} api={api} copied={view.copied}
           onCreated={(runId) => setView({ name: 'run', runId })} onCancel={() => setView({ name: 'runs' })} />
+      )}
+      {view.name === 'batches' && (
+        <BatchesScreen api={api} onNewBatch={() => setView({ name: 'newBatch' })}
+          onOpenRun={(runId) => setView({ name: 'run', runId })} onCompare={(batchIds) => setView({ name: 'compare', batchIds })} />
+      )}
+      {view.name === 'newBatch' && (
+        <NewRunScreen api={api} batch onCreated={() => setView({ name: 'batches' })} onCancel={() => setView({ name: 'batches' })} />
+      )}
+      {view.name === 'compare' && (
+        <CompareScreen api={api} batchIds={view.batchIds} onBack={() => setView({ name: 'batches' })}
+          onOpenRun={(runId) => setView({ name: 'run', runId })} />
       )}
       {view.name === 'run' && (
         <RunScreen key={view.runId} api={api} token={token} runId={view.runId} onBack={() => setView({ name: 'runs' })}
