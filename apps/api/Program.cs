@@ -396,7 +396,11 @@ research.MapGet("/compare", (HttpRequest request, BatchStore batches, ResearchRe
             ["excluded"] = g.Excluded
         }).ToArray()),
         ["configuration"] = Comparison.Differences(groups.Select(g => (IReadOnlyList<JsonObject>)g.Snapshots).ToList()),
-        ["metrics"] = metrics
+        ["metrics"] = metrics,
+        // ADR-0018: outcomes of the included runs; each group lists runs that never reached a situation apart.
+        ["outcomesVersion"] = OutcomesV1.Version,
+        ["outcomes"] = Comparison.SummarizeOutcomes(groups.Select(g => (g.Batch["batchId"]!,
+            (IReadOnlyList<JsonObject>)g.Included.Select(m => reads.Outcomes(m["runId"]!.GetValue<Guid>())!).ToList())).ToList())
     });
 }, isRead: true));
 

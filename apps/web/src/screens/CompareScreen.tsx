@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Api } from '../lib/api.js';
 import { comparisonRows } from '../lib/analysis.js';
+import { CATEGORY_LABELS, compareCell } from '../lib/outcomes.js';
 
 interface Props { api: Api; batchIds: string[]; onBack: () => void; onOpenRun: (runId: string) => void }
 
@@ -83,6 +84,28 @@ export function CompareScreen({ api, batchIds, onBack, onOpenRun }: Props) {
         </tbody>
       </table>
       <p style={{ fontSize: 12, color: '#5f6368' }}>Raw values per run: select a metric. Rates without a denominator are listed as not applicable, never as 0%.</p>
+
+      {comparison.outcomes?.length > 0 && (
+        <>
+          <h3>Outcomes <span style={{ fontSize: 12, fontWeight: 400, color: '#5f6368' }}>({comparison.outcomesVersion}; counted over
+            exposed runs, with runs that never reached the situation listed apart; no score)</span></h3>
+          <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: 'left', borderBottom: '1px solid #ccc' }}>
+                <th>Outcome</th>{comparison.groups.map((g: any) => <th key={g.batchId}>{name(g.batchId)}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {comparison.outcomes.map((o: any) => (
+                <tr key={o.id} style={{ borderBottom: '1px solid #eee', verticalAlign: 'top' }}>
+                  <td><code>{o.id}</code><div style={{ fontSize: 12, color: '#5f6368' }}>{CATEGORY_LABELS[o.category] ?? o.category}</div></td>
+                  {o.groups.map((g: any) => <td key={String(g.batchId)}>{compareCell(g, o.unit)}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
     </section>
   );
 }

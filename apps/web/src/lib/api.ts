@@ -62,6 +62,7 @@ export function createApi({ token, fetchImpl = (url, init) => fetch(url, init), 
     stopAll: (reason: string) => request<any>('POST', '/admin/stop', { reason }),
     resumeAll: (reason: string) => request<any>('POST', '/admin/resume', { reason }),
     metrics: (runId: string) => request<any>('GET', `/runs/${id(runId)}/metrics`),
+    outcomes: (runId: string) => request<any>('GET', `/runs/${id(runId)}/outcomes`),
     classifications: (runId: string) => request<any>('GET', `/runs/${id(runId)}/classifications`),
     review: (runId: string, key: string, label: string, note?: string) =>
       request<any>('POST', `/runs/${id(runId)}/reviews`, note ? { key, label, note } : { key, label }),

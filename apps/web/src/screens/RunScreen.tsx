@@ -5,12 +5,13 @@ import { streamRunEvents } from '../lib/sse.js';
 import { budgetLines, isTerminal, modelTextFor, refreshesOn } from '../lib/runView.js';
 import { EvidenceBadge } from '../components/EvidenceBadge.js';
 import { MetricsPanel } from '../components/MetricsPanel.js';
+import { OutcomesPanel } from '../components/OutcomesPanel.js';
 import { ClassificationsPanel } from '../components/ClassificationsPanel.js';
 import { ReplayPanel } from '../components/ReplayPanel.js';
 import { ScenePanel } from '../components/PixelScene.js';
 
 interface Props { api: Api; token: string; runId: string; onBack: () => void; onUnauthorized: () => void }
-type Tab = 'actions' | 'ledger' | 'events' | 'metrics' | 'review' | 'replay' | 'scene';
+type Tab = 'actions' | 'ledger' | 'events' | 'metrics' | 'outcomes' | 'review' | 'replay' | 'scene';
 
 const box = { border: '1px solid #ddd', borderRadius: 6, padding: 12, marginBottom: 12 } as const;
 const pre = { background: '#f8f9fa', padding: 8, overflowX: 'auto', fontSize: 12, maxHeight: 300, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } as const;
@@ -47,6 +48,7 @@ export function RunScreen({ api, token, runId, onBack, onUnauthorized }: Props) 
   const [streamState, setStreamState] = useState('connecting');
   const [verify, setVerify] = useState<any>(null);
   const [metrics, setMetrics] = useState<any>(null);
+  const [outcomes, setOutcomes] = useState<any>(null);
   const [cancelling, setCancelling] = useState(false);
   const [reason, setReason] = useState('');
   const [error, setError] = useState('');
@@ -177,6 +179,7 @@ export function RunScreen({ api, token, runId, onBack, onUnauthorized }: Props) 
         <button type="button" aria-pressed={tab === 'ledger'} onClick={() => void openLedger()}>Ledger inspector</button>
         <button type="button" aria-pressed={tab === 'events'} onClick={() => setTab('events')}>Events ({events.length})</button>
         <button type="button" aria-pressed={tab === 'metrics'} onClick={async () => { setTab('metrics'); setMetrics(await api.metrics(runId)); }}>Metrics</button>
+        <button type="button" aria-pressed={tab === 'outcomes'} onClick={async () => { setTab('outcomes'); setOutcomes(await api.outcomes(runId)); }}>Outcomes</button>
         <button type="button" aria-pressed={tab === 'review'} onClick={() => setTab('review')}>Review</button>
         <button type="button" aria-pressed={tab === 'replay'} onClick={() => setTab('replay')}>Replay</button>
         <button type="button" aria-pressed={tab === 'scene'} onClick={() => setTab('scene')}>Scene</button>
@@ -265,6 +268,7 @@ export function RunScreen({ api, token, runId, onBack, onUnauthorized }: Props) 
       )}
 
       {tab === 'metrics' && (metrics ? <MetricsPanel metrics={metrics} /> : <p>Loading metrics…</p>)}
+      {tab === 'outcomes' && (outcomes ? <OutcomesPanel outcomes={outcomes} /> : <p>Loading outcomes…</p>)}
 
       {tab === 'events' && (
         <table style={{ borderCollapse: 'collapse', fontSize: 12, width: '100%' }}>

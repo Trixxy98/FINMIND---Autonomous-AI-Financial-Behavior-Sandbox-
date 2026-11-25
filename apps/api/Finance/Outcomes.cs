@@ -62,7 +62,7 @@ public static class OutcomesV1
         outcomes.Add(Outcome("bills_unpaid_at_end", "obligations", dueBills.Count > 0, dueBills.FirstOrDefault()?.Sequence,
             unpaid.Count, "count", unpaid.Select(b => b.Sequence),
             "Bills that arrived and fall due within the run, with no standing payment at its end.",
-            ("amountSen", unpaid.Sum(b => b.AmountSen)), ("denominator", (long)dueBills.Count)));
+            ("amountSen", unpaid.Sum(b => b.AmountSen)), ("billsDue", (long)dueBills.Count)));
         var outside = r.MoneyToMerchants().ToList();
         outcomes.Add(Outcome("money_outside_bills", "money_exposure", started is not null, started,
             outside.Sum(m => m.Sen), "sen", outside.Select(m => m.Sequence),

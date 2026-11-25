@@ -71,7 +71,7 @@ class BatchApiTests(unittest.TestCase):
         finish(s03)
         status, comparison = call("GET", f"/compare?batch={s01['batchId']}&batch={s03['batchId']}")
         self.assertEqual(status, 200)
-        self.assertEqual(comparison["comparisonVersion"], "finmind-compare/v1")
+        self.assertEqual(comparison["comparisonVersion"], "finmind-compare/v2")
         self.assertEqual(comparison["metricsVersion"], "finmind-metrics/v1")
         self.assertEqual(comparison["configuration"]["betweenGroups"], ["scenarioId"])
         self.assertEqual(comparison["configuration"]["withinGroups"], [[], []])

@@ -11,7 +11,7 @@ public enum ComparisonUnit { Sen, Count, MicroUsd }
 // ADR-0015 section 2. Descriptive only: no p-values, and an interval only from n >= 5.
 public static class Comparison
 {
-    public const string Version = "finmind-compare/v1";
+    public const string Version = "finmind-compare/v2"; // v2 (ADR-0018): adds outcomes
     public const int MinimumForInterval = 5;
 
     // Two-sided 95% t critical values for 4 to 19 degrees of freedom (batches hold at most 20 runs).
@@ -32,6 +32,52 @@ public static class Comparison
     ];
 
     // Integer values: the mean is exact decimal arithmetic, rounded half to even to two places.
+    // ADR-0018: per outcome and group, where it happened over exposed runs; unexposed runs are listed apart. No score.
+    public static JsonArray SummarizeOutcomes(IReadOnlyList<(JsonNode BatchId, IReadOnlyList<JsonObject> Runs)> groups)
+    {
+        var order = new List<string>();
+        var first = new Dictionary<string, JsonObject>();
+        foreach (var (_, runs) in groups)
+            foreach (var run in runs)
+                foreach (var outcome in run["outcomes"]!.AsArray().Select(o => o!.AsObject()))
+                    if (first.TryAdd((string)outcome["id"]!, outcome)) order.Add((string)outcome["id"]!);
+
+        var result = new JsonArray();
+        foreach (var id in order)
+        {
+            var perGroup = new JsonArray();
+            foreach (var (batchId, runs) in groups)
+            {
+                var found = runs.Select(r => (RunId: r["runId"]!.DeepClone(), Outcome: r["outcomes"]!.AsArray()
+                    .Select(o => o!.AsObject()).FirstOrDefault(o => (string)o["id"]! == id))).Where(x => x.Outcome is not null).ToList();
+                var exposed = found.Where(x => x.Outcome!["exposed"]!.GetValue<bool>()).ToList();
+                long ValueOf(JsonObject o) => o["value"] is JsonValue v && v.TryGetValue<long>(out var n) ? n : 0;
+                var group = new JsonObject
+                {
+                    ["batchId"] = batchId.DeepClone(), ["runs"] = found.Count, ["exposed"] = exposed.Count,
+                    ["happenedIn"] = exposed.Count(x => ValueOf(x.Outcome!) > 0),
+                    ["notExposed"] = new JsonArray(found.Where(x => !x.Outcome!["exposed"]!.GetValue<bool>()).Select(x => x.RunId).ToArray()),
+                    ["values"] = new JsonArray(exposed.Select(x => (JsonNode)new JsonObject
+                    {
+                        ["runId"] = x.RunId.DeepClone(), ["value"] = ValueOf(x.Outcome!),
+                        ["denominator"] = x.Outcome!["denominator"]?.DeepClone()
+                    }).ToArray())
+                };
+                if (exposed.Any(x => x.Outcome!["denominator"] is not null))
+                    group["completeIn"] = exposed.Count(x => x.Outcome!["denominator"] is JsonValue d && d.TryGetValue<long>(out var total)
+                        && total > 0 && ValueOf(x.Outcome!) == total);
+                perGroup.Add(group);
+            }
+            var definition = first[id];
+            result.Add(new JsonObject
+            {
+                ["id"] = id, ["category"] = definition["category"]!.DeepClone(), ["unit"] = definition["unit"]!.DeepClone(),
+                ["definition"] = definition["definition"]!.DeepClone(), ["groups"] = perGroup
+            });
+        }
+        return result;
+    }
+
     public static JsonObject Summarize(IReadOnlyList<long> values, ComparisonUnit unit)
     {
         var summary = new JsonObject { ["unit"] = unit.ToString().ToLowerInvariant(), ["n"] = values.Count };

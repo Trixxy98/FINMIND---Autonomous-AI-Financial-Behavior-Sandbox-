@@ -85,7 +85,8 @@ public sealed class OutcomeTests
             var all = Outcomes(r);
             Assert.Equal((0L, 3L), (Value(O(all, "bills_paid_by_due"))!.Value, O(all, "bills_paid_by_due")["denominator"]!.GetValue<long>()));
             var unpaid = O(all, "bills_unpaid_at_end");
-            Assert.Equal((2L, 63_000L), (Value(unpaid)!.Value, unpaid["amountSen"]!.GetValue<long>()));
+            Assert.Equal((2L, 63_000L, 3L), (Value(unpaid)!.Value, unpaid["amountSen"]!.GetValue<long>(), unpaid["billsDue"]!.GetValue<long>()));
+            Assert.Null(unpaid["denominator"]); // a "complete" unpaid count would read as an achievement in comparisons
         },
         ["a_reversed_payment_does_not_count_as_paid"] = ledger =>
         {

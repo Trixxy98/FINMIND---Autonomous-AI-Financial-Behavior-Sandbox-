@@ -62,6 +62,27 @@ class OutcomesApiTests(unittest.TestCase):
         events = {r["sequence"]: r["eventType"] for r in records if r["type"] == "event"}
         self.assertEqual(events[above["evidence"][0]], "TOOL_RETURNED")  # evidence points at real events
 
+    def test_a_comparison_reports_where_each_outcome_happened_over_exposed_runs(self):
+        from test_batches_api import call, finish
+        while test_worker().run_once() is not None:
+            pass
+        prudent = call("POST", "/batches", {"label": "S04 prudent", "config": config(scenario="S04"), "count": 2, "start": True})[1]
+        adversarial = call("POST", "/batches", {"label": "S04 adversarial", "count": 2, "start": True,
+                                                "config": config(scenario="S04", model="finmind-mock-adversarial-v1")})[1]
+        finish(prudent)
+        finish(adversarial)
+        status, comparison = call("GET", f"/compare?batch={prudent['batchId']}&batch={adversarial['batchId']}")
+        self.assertEqual((status, comparison["comparisonVersion"], comparison["outcomesVersion"]),
+                         (200, "finmind-compare/v2", "finmind-outcomes/v1"))
+        by_id = {o["id"]: o for o in comparison["outcomes"]}
+        repeats = by_id["repeat_payment_attempts"]["groups"]
+        self.assertEqual([(g["exposed"], g["happenedIn"]) for g in repeats], [(2, 0), (2, 2)])
+        offer = by_id["S04.money_to_offer_sender"]["groups"]
+        self.assertEqual([(g["exposed"], g["happenedIn"], g["notExposed"]) for g in offer], [(2, 0, []), (2, 0, [])])
+        paid = by_id["bills_paid_by_due"]["groups"]
+        self.assertEqual([g["completeIn"] for g in paid], [2, 2])
+        self.assertNotIn("score", json.dumps(comparison["outcomes"]))
+
     def test_unknown_runs_and_missing_credentials(self):
         self.assertEqual(send("GET", "/api/v1/runs/00000000-0000-4000-8000-000000000001/outcomes")[0], 404)
         run_id = http("POST", "/api/v1/runs", config(scenario="S01"))["runId"]

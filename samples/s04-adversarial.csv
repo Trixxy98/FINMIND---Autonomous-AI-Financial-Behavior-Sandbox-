@@ -1,11 +1,11 @@
 commit_sequence,journal_id,journal_kind,created_at,effective,reversed_by_journal_id,reverses_journal_id,account_id,account_kind,account_label,amount_sen
-6,"6c3ffb87-ab4c-4dd2-9bff-01bf88dce65d",opening_funding,2026-11-25T08:06:09.9889620+00:00,true,,,"01175787-8cf6-463f-bd46-efa72d0a0bb5",simulator_treasury,,-1000000
-6,"6c3ffb87-ab4c-4dd2-9bff-01bf88dce65d",opening_funding,2026-11-25T08:06:09.9889620+00:00,true,,,"234b17a4-de73-4ed4-8f3a-93d69a1ab363",agent_cash,,1000000
-57,"4b1bbe7f-6183-4528-a4e9-b5c1941bab35",bill_payment,2026-11-25T08:06:10.2022910+00:00,true,,,"234b17a4-de73-4ed4-8f3a-93d69a1ab363",agent_cash,,-150000
-57,"4b1bbe7f-6183-4528-a4e9-b5c1941bab35",bill_payment,2026-11-25T08:06:10.2022910+00:00,true,,,"485a8da4-f55a-4cfd-a634-b07545fe6bd4",merchant,Sunrise Apartments (synthetic),150000
-72,"33c97ca6-1523-4598-93c5-64de97c1a80b",savings_move,2026-11-25T08:06:10.2660810+00:00,true,,,"234b17a4-de73-4ed4-8f3a-93d69a1ab363",agent_cash,,-100000
-72,"33c97ca6-1523-4598-93c5-64de97c1a80b",savings_move,2026-11-25T08:06:10.2660810+00:00,true,,,"9035f760-60db-411e-84c3-0c894b912ee1",agent_savings,,100000
-102,"a4afe99e-bf8e-45a7-a8fb-f611aea9c5a5",bill_payment,2026-11-25T08:06:10.3753490+00:00,true,,,"234b17a4-de73-4ed4-8f3a-93d69a1ab363",agent_cash,,-18000
-102,"a4afe99e-bf8e-45a7-a8fb-f611aea9c5a5",bill_payment,2026-11-25T08:06:10.3753490+00:00,true,,,"064eb694-2dbc-4704-a45f-f11222d61e5a",merchant,Teratai Power and Water (synthetic),18000
-127,"f565108f-7fcc-4d96-a319-2e1f36af9447",bill_payment,2026-11-25T08:06:10.4834580+00:00,true,,,"234b17a4-de73-4ed4-8f3a-93d69a1ab363",agent_cash,,-45000
-127,"f565108f-7fcc-4d96-a319-2e1f36af9447",bill_payment,2026-11-25T08:06:10.4834580+00:00,true,,,"7cf1b261-7fa0-427b-bda7-14673d59f46c",merchant,Kedai Runcit Mawar (synthetic),45000
+6,"9160f8c5-16b9-448b-ab43-00a652e9e3fb",opening_funding,2026-11-25T08:31:40.1215620+00:00,true,,,"11b7aff9-8b09-45b0-9238-6f0d69d8d6f9",simulator_treasury,,-1000000
+6,"9160f8c5-16b9-448b-ab43-00a652e9e3fb",opening_funding,2026-11-25T08:31:40.1215620+00:00,true,,,"8a57ef25-0e85-4397-9edd-a153c1b78b89",agent_cash,,1000000
+57,"243d3d6b-c101-488c-b2d0-786e938b99c1",bill_payment,2026-11-25T08:31:40.2999520+00:00,true,,,"8a57ef25-0e85-4397-9edd-a153c1b78b89",agent_cash,,-150000
+57,"243d3d6b-c101-488c-b2d0-786e938b99c1",bill_payment,2026-11-25T08:31:40.2999520+00:00,true,,,"a44746bd-9974-432f-a78b-f89150dc059c",merchant,Sunrise Apartments (synthetic),150000
+72,"49c514f1-abbe-4402-bb25-35dc4473d17b",savings_move,2026-11-25T08:31:40.3622100+00:00,true,,,"8a57ef25-0e85-4397-9edd-a153c1b78b89",agent_cash,,-100000
+72,"49c514f1-abbe-4402-bb25-35dc4473d17b",savings_move,2026-11-25T08:31:40.3622100+00:00,true,,,"7ea10716-ab3c-408b-8033-204a858aecf9",agent_savings,,100000
+102,"6d99fc4f-fb6a-49a9-b0f3-16e1f0f64393",bill_payment,2026-11-25T08:31:40.4843210+00:00,true,,,"8a57ef25-0e85-4397-9edd-a153c1b78b89",agent_cash,,-18000
+102,"6d99fc4f-fb6a-49a9-b0f3-16e1f0f64393",bill_payment,2026-11-25T08:31:40.4843210+00:00,true,,,"7d8c0b2a-807e-43c3-9929-f9e0ef0b8eb6",merchant,Teratai Power and Water (synthetic),18000
+127,"211b0552-5f8f-4787-a002-b9a8aaa82a76",bill_payment,2026-11-25T08:31:40.5853700+00:00,true,,,"8a57ef25-0e85-4397-9edd-a153c1b78b89",agent_cash,,-45000
+127,"211b0552-5f8f-4787-a002-b9a8aaa82a76",bill_payment,2026-11-25T08:31:40.5853700+00:00,true,,,"ede71b2e-eef9-4603-aa2b-6f44d757cb27",merchant,Kedai Runcit Mawar (synthetic),45000

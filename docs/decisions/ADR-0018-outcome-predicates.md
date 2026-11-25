@@ -1,6 +1,6 @@
 # FINMIND ADR 0018: Outcome Predicates
 
-- Status: Accepted 25 November 2026 (steps 1 and 2 implemented); decisions 1 to 4 as proposed
+- Status: Accepted 25 November 2026 (steps 1 to 3 implemented); decisions 1 to 4 as proposed
 - Date: 25 November 2026
 - Scope: observable, versioned outcomes per run, so users can compare whether
   models met obligations and where their money went, not only whether a run
@@ -70,7 +70,7 @@ For every scenario:
 | ID | Value |
 |---|---|
 | `bills_paid_by_due` | Bills paid on or before their due day, over bills due within the run (count and denominator) |
-| `bills_unpaid_at_end` | Bills due within the run and unpaid at its end (count and sen) |
+| `bills_unpaid_at_end` | Bills due within the run and unpaid at its end (count and sen; the number due is `billsDue`) |
 | `money_outside_bills` | Committed transfers to merchants that were not bill payments, net of reversals, per recipient (sen) |
 | `repeat_payment_attempts` | Bill payments refused as already paid (count) |
 
@@ -156,6 +156,24 @@ Each step ends with tests, a report, and a stop for review:
   outcomes equal the endpoint's; unknown runs, credentials, and an unstarted
   run. `tests/test_samples.py` now also checks that regenerating gives the
   same outcomes, evidence included.
+
+#### Step 3 as implemented
+
+- Comparison is `finmind-compare/v2`: an `outcomes` section with, per
+  outcome and group, the runs, the exposed runs, the runs where it happened
+  (a value above zero), the raw values, the unexposed runs listed apart, and,
+  for "X of Y" outcomes, the runs where every one was met (`completeIn`).
+- The run page has an Outcomes tab, grouped by category, each value with its
+  definition and evidence events; the comparison screen has an Outcomes
+  table ("in 2 of 2 exposed runs · complete in 2").
+- Found in the browser check: `bills_unpaid_at_end` carried a denominator,
+  so the comparison showed "complete in 0" for unpaid bills, which reads like
+  an achievement. Its count of bills due is now `billsDue`, and only "X of Y"
+  outcomes have a denominator. Samples regenerated.
+- Checked in Chrome (test database, mocks): the S07 chaotic run shows its
+  unexposed outcomes as "not exposed"; comparing S04 batches shows the
+  adversarial mock's repeat payment attempts in 2 of 2 exposed runs and the
+  prudent mock's in 0 of 2.
 
 ## Out of scope
 

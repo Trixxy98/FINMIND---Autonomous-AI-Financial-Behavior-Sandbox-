@@ -109,7 +109,7 @@ Capabilities a model may try but that do not exist: `set_balance_directly`,
   `SCENARIO_EVENT_DELIVERED`, and `CLOCK_ADVANCED`.
 - Evidence labels on every action: `committed`, `denied`,
   `reported_by_agent`, `proposed`; balances are `verified_by_ledger`.
-- Versioned definitions: `finmind-metrics/v1`, `finmind-compare/v1`,
+- Versioned definitions: `finmind-metrics/v1`, `finmind-compare/v2`,
   `finmind-classifications/v1`, `finmind-outcomes/v1`, `finmind-export/v2`, `finance-reasons/v8`,
   `finmind-cues/v1`.
 - Other append-only tables: `run_batches`, `classification_reviews`,
