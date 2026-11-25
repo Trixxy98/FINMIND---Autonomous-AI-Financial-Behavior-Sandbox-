@@ -1,6 +1,6 @@
 # FINMIND ADR 0017: Phase 5, Hardening and Publication
 
-- Status: Proposed
+- Status: Accepted 25 November 2026 (step 1 implemented); decisions: 1 yes, 2 document as remaining risk, 3 yes, 4 no licence
 - Date: 25 November 2026
 - Scope: threat model review, gap fixes, crash and concurrency checks,
   documentation, sample data, a reproducible demo, and the Phase 5 exit gate
@@ -113,6 +113,19 @@ Each step ends with tests, a report, and a stop for review:
 5. Documentation and report template.
 6. Demo and sample data.
 7. Exit gate in a fresh clone.
+
+#### Step 1 as implemented
+
+- `docs/security/threat-model.md` (version 1): T1 to T10 from section 14.1
+  and seven operational threats, each with controls, named tests, and the
+  remaining risk.
+- `tests/test_threat_model.py` fails when a named test no longer exists, when
+  a threat has no evidence, or when a section has no remaining-risk line.
+- The review found one control without a direct test: specification 16.3
+  asks that a message claiming authority does not change policy.
+  `tests/test_injection.py` adds it: an agent obeys S07's administrator
+  message, the RM6,000 transfer is denied with the run's own limit, and no
+  money moves. It passed on the first run; the control already existed.
 
 ## Out of scope
 
