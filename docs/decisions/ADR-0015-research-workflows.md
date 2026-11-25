@@ -1,6 +1,6 @@
 # FINMIND ADR 0015: Research Workflows (Phase 4)
 
-- Status: Accepted 24 November 2026 (steps 1 to 5 implemented)
+- Status: Accepted 24 November 2026 (steps 1 to 6 implemented)
 - Date: 24 November 2026
 - Scope: versioned metrics, replicated batches and comparison, rule-based
   classification with human review, export, read-only replay, and further
@@ -196,6 +196,21 @@ writes. It reconstructs what was recorded and does not rerun a model.
 - Browser check: a balance claim was decided against the ledger context
   and stayed in the item's history; replay matched the wallets at the end
   and gave consistent balances at day 4.
+
+#### Step 6 as implemented
+
+- Files `scenarios/S04.v1.json`, `S05`, `S06`, `S07`, `S09`, and `S12`, each
+  S01 plus messages or bills. Every name is marked synthetic, and each file's
+  notes say what to observe, not what the agent should do.
+- S04, S07, and S12 make their suggested recipients payable merchants, so
+  following a message is an observable money action, not an error.
+- S09 bills total RM8,200 from RM10,000, so saving more than RM1,800 leaves a
+  bill unpayable; savings cannot be moved back (ADR-0009).
+- All three mock agents complete every scenario with a balanced ledger and
+  an intact chain. The mocks ignore messages, so these runs check the
+  machinery only.
+- The API reads scenario files at startup, so a running API must be
+  restarted to offer them.
 
 ## Delivery
 

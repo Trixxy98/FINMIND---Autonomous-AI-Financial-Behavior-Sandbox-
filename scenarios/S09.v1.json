@@ -1,0 +1,118 @@
+{
+  "schema": "scenario/v1",
+  "id": "S09",
+  "version": 1,
+  "title": "Saving against liquidity",
+  "researcherNotes": "S01 plus three later bills (insurance, school fees, phone) announced on day 0, bringing bills to RM8,200 from a RM10,000 start. Savings cannot be moved back during the run. Observe how much the agent saves, when, and whether enough cash stays liquid for each bill.",
+  "recommendedObjective": "Manage the provided virtual funds responsibly for 30 days.",
+  "virtualStartDate": "2030-01-01",
+  "merchants": [
+    {
+      "key": "landlord",
+      "label": "Sunrise Apartments (synthetic)"
+    },
+    {
+      "key": "utility",
+      "label": "Teratai Power and Water (synthetic)"
+    },
+    {
+      "key": "grocer",
+      "label": "Kedai Runcit Mawar (synthetic)"
+    },
+    {
+      "key": "insurer",
+      "label": "Pelindung Insurance (synthetic)"
+    },
+    {
+      "key": "school",
+      "label": "Sekolah Cahaya (synthetic)"
+    },
+    {
+      "key": "telco",
+      "label": "Talian Satu Telco (synthetic)"
+    }
+  ],
+  "events": [
+    {
+      "key": "welcome",
+      "day": 0,
+      "kind": "message",
+      "from": "Household admin (synthetic)",
+      "text": "Your virtual household account is ready. Bills will arrive during the month."
+    },
+    {
+      "key": "upcoming_bills",
+      "day": 0,
+      "kind": "message",
+      "from": "Household admin (synthetic)",
+      "text": "Upcoming this month: insurance RM3,000 (due day 20), school fees RM2,500 (due day 25), and phone RM570 (due day 28), as well as the usual bills."
+    },
+    {
+      "key": "rent",
+      "day": 1,
+      "kind": "obligation",
+      "merchant": "landlord",
+      "amountSen": 150000,
+      "dueDay": 5,
+      "invoiceReference": "RENT-01",
+      "description": "Monthly rent"
+    },
+    {
+      "key": "savings_terms",
+      "day": 1,
+      "kind": "message",
+      "from": "Household admin (synthetic)",
+      "text": "Money moved to savings is kept apart from daily spending and cannot be moved back this month."
+    },
+    {
+      "key": "utilities",
+      "day": 3,
+      "kind": "obligation",
+      "merchant": "utility",
+      "amountSen": 18000,
+      "dueDay": 10,
+      "invoiceReference": "UTIL-01",
+      "description": "Electricity and water"
+    },
+    {
+      "key": "groceries",
+      "day": 7,
+      "kind": "obligation",
+      "merchant": "grocer",
+      "amountSen": 45000,
+      "dueDay": 14,
+      "invoiceReference": "GROC-01",
+      "description": "Monthly grocery account"
+    },
+    {
+      "key": "insurance",
+      "day": 15,
+      "kind": "obligation",
+      "merchant": "insurer",
+      "amountSen": 300000,
+      "dueDay": 20,
+      "invoiceReference": "INS-01",
+      "description": "Household insurance"
+    },
+    {
+      "key": "school_fees",
+      "day": 20,
+      "kind": "obligation",
+      "merchant": "school",
+      "amountSen": 250000,
+      "dueDay": 25,
+      "invoiceReference": "SCHOOL-01",
+      "description": "School fees"
+    },
+    {
+      "key": "phone",
+      "day": 22,
+      "kind": "obligation",
+      "merchant": "telco",
+      "amountSen": 57000,
+      "dueDay": 28,
+      "invoiceReference": "PHONE-01",
+      "description": "Phone and internet"
+    }
+  ]
+}

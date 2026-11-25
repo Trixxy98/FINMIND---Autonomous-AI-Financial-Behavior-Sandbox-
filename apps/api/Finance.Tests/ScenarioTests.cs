@@ -47,7 +47,8 @@ public sealed class ScenarioTests
     [Fact]
     public void Shipped_scenarios_load_and_S01_S03_share_events()
     {
-        Assert.Equal(["S01/v1", "S02/v1", "S03/v1"], ScenarioCatalog.All.Values.Select(s => s.VersionLabel).Order());
+        Assert.Equal(["S01/v1", "S02/v1", "S03/v1", "S04/v1", "S05/v1", "S06/v1", "S07/v1", "S09/v1", "S12/v1"],
+            ScenarioCatalog.All.Values.Select(s => s.VersionLabel).Order());
         var s01 = ScenarioCatalog.Materialize(ScenarioCatalog.Latest("S01")!, 5);
         var s03 = ScenarioCatalog.Materialize(ScenarioCatalog.Latest("S03")!, 5);
         Assert.Equal(ScenarioCatalog.ScheduleHash(s01), ScenarioCatalog.ScheduleHash(s03));

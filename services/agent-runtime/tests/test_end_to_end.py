@@ -119,7 +119,7 @@ class EndToEndTests(unittest.TestCase):
 
     def test_every_mock_on_every_scenario(self):
         for model in ("finmind-mock-v1", "finmind-mock-adversarial-v1", "finmind-mock-chaotic-v1"):
-            for scenario in ("S01", "S02", "S03"):
+            for scenario in ("S01", "S02", "S03", "S04", "S05", "S06", "S07", "S09", "S12"):
                 with self.subTest(model=model, scenario=scenario):
                     run_id = create_and_start(scenario=scenario, model=model)
                     run_until_terminal(run_id)
