@@ -176,11 +176,13 @@ AGENT everywhere.
 
 ### O1. Secret leakage
 
-The API refuses to start with provider credentials; only the worker holds
-them. Agent text is redacted; errors keep only a class name; reads and exports
+The API refuses to start with any provider credential (Anthropic, OpenAI,
+Groq, Gemini), including providers whose adapter does not exist yet; only the
+worker holds them. Agent text is redacted; errors keep only a class name; reads and exports
 never include credentials.
 
 - `apps/api/Finance.Tests/RequestGuardTests.cs::Unsafe_configuration_stops_startup`
+- `apps/api/Finance.Tests/ProviderCatalogTests.cs::Every_provider_credential_is_refused_even_before_its_adapter_exists`
 - `services/agent-runtime/tests/test_trust_boundary.py::test_worker_refuses_database_and_researcher_credentials`
 - `apps/api/Finance.Tests/ToolGatewayTests.cs::agent_text_is_redacted_and_truncated`
 - `services/agent-runtime/tests/test_claude.py::test_api_errors_keep_only_the_class_name`

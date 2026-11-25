@@ -178,3 +178,21 @@ class ReadApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(API and len(TOKEN) >= 32 and len(RESEARCHER) >= 32,
+                     "set FINMIND_E2E_API_URL, FINMIND_WORKER_TOKEN, and FINMIND_RESEARCHER_TOKEN")
+class ModelCatalogApiTests(unittest.TestCase):
+    """ADR-0019 step 1: each model names its provider, its price version, and whether it was verified live."""
+
+    def test_models_state_their_provider_prices_and_live_status(self):
+        models = get("/models")["models"]
+        mocks = [m for m in models if m["provider"] == "mock"]
+        paid = [m for m in models if m["paid"]]
+        self.assertTrue(mocks and paid)
+        for m in mocks:
+            self.assertEqual((m["pricingVersion"], m["verifiedLive"]), ("none", True))
+        for m in paid:
+            self.assertTrue(m["pricingVersion"].startswith(m["provider"] + "-pricing/"), m)
+            self.assertIs(m["verifiedLive"], False, m)
+            self.assertTrue(m["providerLabel"])

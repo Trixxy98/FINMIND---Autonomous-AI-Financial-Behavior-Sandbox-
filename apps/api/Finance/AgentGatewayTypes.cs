@@ -70,13 +70,14 @@ public static class AgentGatewayRules
     // committed = recorded cost + outstanding reservations. Null when not even a minimal answer fits under the cap.
     public static (long MaxOutputTokens, long CostMicroUsd)? Grant(JsonObject snapshot, long committed, ModelReservation request)
     {
-        if (Provider(snapshot) != "anthropic") return (request.MaxOutputTokens, 0);
+        var provider = Provider(snapshot);
+        if (!ProviderCatalog.IsPaid(provider)) return (request.MaxOutputTokens, 0);
         var model = ModelId(snapshot);
         var requested = Math.Min(request.MaxOutputTokens, Number(snapshot["agent"]!["settings"]!.AsObject(), "maxOutputTokensPerTurn"));
         var granted = Math.Min(requested,
-            PricingCatalog.AffordableOutputTokens(model, request.InputTokens, MaxCostMicroUsd(snapshot) - committed));
+            PricingCatalog.AffordableOutputTokens(provider, model, request.InputTokens, MaxCostMicroUsd(snapshot) - committed));
         if (granted < Math.Min(MinimumOutputTokens, requested)) return null;
-        return (granted, PricingCatalog.WorstCaseMicroUsd(model, request.InputTokens, granted));
+        return (granted, PricingCatalog.WorstCaseMicroUsd(provider, model, request.InputTokens, granted));
     }
 
     public static JsonObject[] Settled(IEnumerable<JsonObject> reservations, ModelInvocation invocation) =>

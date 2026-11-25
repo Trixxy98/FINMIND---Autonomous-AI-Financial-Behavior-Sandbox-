@@ -54,7 +54,7 @@ public static class StartupChecks
             problems.Add($"FINMIND_RESEARCHER_TOKEN must be at least {MinTokenLength} characters.");
         if (!string.IsNullOrEmpty(researcher) && researcher == setting("FINMIND_WORKER_TOKEN"))
             problems.Add("FINMIND_WORKER_TOKEN must differ from the researcher token.");
-        foreach (var name in new[] { "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN" })
+        foreach (var name in ProviderCatalog.CredentialNames)
             if (!string.IsNullOrEmpty(setting(name)))
                 problems.Add($"{name} is set; provider credentials belong to the worker only (ADR-0012).");
         if (!AgentGatewayRules.IsValidSessionLifetime(setting("FINMIND_SESSION_LIFETIME_SECONDS")))

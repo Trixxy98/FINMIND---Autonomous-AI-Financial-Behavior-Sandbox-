@@ -47,6 +47,26 @@ public sealed record ModelPrice(long Input, long Output, long CacheRead, long Ca
     }
 }
 
+// ADR-0019: one catalog of paid providers. Configuration, prices, credentials, and the app all read it.
+// VerifiedLive is true only after a smoke run against the provider's live API has been reported.
+public sealed record ProviderInfo(string Id, string Label, string PricingVersion, IReadOnlyDictionary<string, ModelPrice> Prices,
+    bool VerifiedLive, bool EffortSetting);
+
+public static class ProviderCatalog
+{
+    public static readonly IReadOnlyDictionary<string, ProviderInfo> Paid = new Dictionary<string, ProviderInfo>
+    {
+        ["anthropic"] = new("anthropic", "Anthropic (Claude)", PricingCatalog.Version, PricingCatalog.AnthropicPrices,
+            VerifiedLive: false, EffortSetting: true),
+    };
+
+    // Refused by the API at startup whether or not the provider's adapter exists yet: credentials belong to the worker.
+    public static readonly IReadOnlyList<string> CredentialNames =
+        ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"];
+
+    public static bool IsPaid(string? provider) => provider is not null && Paid.ContainsKey(provider);
+}
+
 public static class PricingCatalog
 {
     // Source: Anthropic model table (cached 2026-11-03) as provided with the Claude API documentation.
@@ -56,6 +76,8 @@ public static class PricingCatalog
 
     // Cache writes use the documented ~1.25x input rate for 5-minute caching (an estimate, marked here).
     // Haiku 5.5 cache-read price was not listed; 0.1x input is used as a conservative estimate.
+    public static IReadOnlyDictionary<string, ModelPrice> AnthropicPrices => Standard;
+
     private static readonly IReadOnlyDictionary<string, ModelPrice> Standard = new Dictionary<string, ModelPrice>
     {
         ["claude-opus-5-5"] = new(4_000_000, 20_000_000, 200_000, 5_000_000),
@@ -71,32 +93,35 @@ public static class PricingCatalog
     public static long CostMicroUsd(string provider, string modelId, long inputTokens, long outputTokens, long cacheReadTokens,
         long cacheWriteTokens, int requests = 1)
     {
-        if (provider != "anthropic") return 0;
-        var price = PriceFor(modelId, (inputTokens + cacheReadTokens + cacheWriteTokens) / Math.Max(requests, 1));
+        if (!ProviderCatalog.IsPaid(provider)) return 0;
+        var price = PriceFor(provider, modelId, (inputTokens + cacheReadTokens + cacheWriteTokens) / Math.Max(requests, 1));
         return price.Cost(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
     }
 
     // ADR-0013 A1: every input token at the dearest input rate, and every allowed output token used.
-    public static long WorstCaseMicroUsd(string modelId, long inputTokens, long maxOutputTokens)
+    public static long WorstCaseMicroUsd(string provider, string modelId, long inputTokens, long maxOutputTokens)
     {
-        var price = PriceFor(modelId, inputTokens);
+        var price = PriceFor(provider, modelId, inputTokens);
         var dearest = price with { Input = Math.Max(price.Input, price.CacheWrite) };
         return dearest.Cost(inputTokens, maxOutputTokens, 0, 0);
     }
 
     // The most output tokens whose worst case still fits in the remaining budget. May be zero or negative.
-    public static long AffordableOutputTokens(string modelId, long inputTokens, long remainingMicroUsd)
+    public static long AffordableOutputTokens(string provider, string modelId, long inputTokens, long remainingMicroUsd)
     {
-        var price = PriceFor(modelId, inputTokens);
+        var price = PriceFor(provider, modelId, inputTokens);
         return (checked(remainingMicroUsd * 1_000_000) - checked(inputTokens * Math.Max(price.Input, price.CacheWrite))) / price.Output;
     }
 
-    private static ModelPrice PriceFor(string modelId, long promptTokens)
+    public static string VersionFor(string? provider) =>
+        provider is not null && ProviderCatalog.Paid.TryGetValue(provider, out var p) ? p.PricingVersion : "none";
+
+    private static ModelPrice PriceFor(string provider, string modelId, long promptTokens)
     {
-        var price = Standard.TryGetValue(modelId, out var known)
+        var price = ProviderCatalog.Paid.TryGetValue(provider, out var info) && info.Prices.TryGetValue(modelId, out var known)
             ? known
-            : throw new InvalidOperationException($"No price for model {modelId}.");
-        if (modelId == "claude-haiku-5-5" && promptTokens > HaikuLongPromptThreshold)
+            : throw new InvalidOperationException($"No price for {provider} model {modelId}.");
+        if (provider == "anthropic" && modelId == "claude-haiku-5-5" && promptTokens > HaikuLongPromptThreshold)
             price = HaikuLongPrompt;
         return price;
     }

@@ -93,9 +93,8 @@ public static class RunCatalogs
     {
         // ADR-0011 deterministic mock agents.
         ["mock"] = new HashSet<string> { "finmind-mock-v1", "finmind-mock-adversarial-v1", "finmind-mock-chaotic-v1" },
-        // ADR-0012: the researcher chooses the model; claude-opus-5-5 is the default in examples.
-        ["anthropic"] = new HashSet<string> { "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5" }
-    };
+    }.Concat(ProviderCatalog.Paid.Select(p => KeyValuePair.Create(p.Key, (IReadOnlySet<string>)p.Value.Prices.Keys.ToHashSet())))
+     .ToDictionary(); // ADR-0019: paid providers and their models come from the provider catalog.
 
     public const string ConfigSchemaVersion = "run-config/v2";
     public const string ToolsetVersion = "finmind-tools/v1";
@@ -163,7 +162,7 @@ public static class RunConfiguration
 
             var given = agent["settings"] as JsonObject;
             if (agent.ContainsKey("settings") && given is null) errors.Add("agent.settings");
-            if (provider == "anthropic")
+            if (ProviderCatalog.IsPaid(provider))
             {
                 // ADR-0012: effort is always explicit so it is recorded; sampling parameters are not offered.
                 given ??= new JsonObject();
@@ -192,7 +191,7 @@ public static class RunConfiguration
 
         if (errors.Count > 0) throw new RunConfigException(errors.Distinct().Order(StringComparer.Ordinal).ToArray());
 
-        var prompt = provider == "anthropic" ? PromptCatalog.Current : null;
+        var prompt = ProviderCatalog.IsPaid(provider) ? PromptCatalog.Current : null;
         return new JsonObject
         {
             ["objective"] = objective,
@@ -216,7 +215,7 @@ public static class RunConfiguration
             ["reasonCodeCatalog"] = LedgerReasonCodes.CatalogVersion,
             ["promptVersion"] = prompt?.Version ?? "none",
             ["promptHash"] = prompt?.Hash,
-            ["pricingVersion"] = provider == "anthropic" ? PricingCatalog.Version : "none",
+            ["pricingVersion"] = PricingCatalog.VersionFor(provider),
             ["codeRevision"] = string.IsNullOrWhiteSpace(codeRevision) ? "unknown" : codeRevision.Trim()
         };
     }

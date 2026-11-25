@@ -502,9 +502,16 @@ research.MapGet("/scenarios", () => Results.Ok(new
 }));
 research.MapGet("/models", () => Results.Ok(new
 {
-    pricingVersion = PricingCatalog.Version,
+    pricingVersion = PricingCatalog.Version, // kept for older clients; each model now names its own provider's version
     models = RunCatalogs.Models.OrderBy(p => p.Key, StringComparer.Ordinal)
-        .SelectMany(p => p.Value.Order(StringComparer.Ordinal).Select(model => new { provider = p.Key, modelId = model, paid = p.Key != "mock" }))
+        .SelectMany(p => p.Value.Order(StringComparer.Ordinal).Select(model => new
+        {
+            provider = p.Key, modelId = model, paid = ProviderCatalog.IsPaid(p.Key),
+            providerLabel = ProviderCatalog.Paid.TryGetValue(p.Key, out var info) ? info.Label : "Mock (no provider)",
+            pricingVersion = PricingCatalog.VersionFor(p.Key),
+            // ADR-0019: false until a smoke run against the provider's live API has been reported.
+            verifiedLive = info?.VerifiedLive ?? true
+        }))
 }));
 
 // ADR-0009 worker interface. Routes exist only when a worker credential of at least 32 characters is configured.

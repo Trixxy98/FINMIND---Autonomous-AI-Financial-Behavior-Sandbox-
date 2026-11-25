@@ -32,8 +32,9 @@ in place. CI runs every test with mock agents and never calls a paid API.
 FINMIND runs locally: each researcher runs their own copy and brings their
 own provider key. It is not a hosted service. The Claude adapter is tested
 against the pinned Anthropic SDK and a fake transport; it has not yet been
-verified against the live API. `services/agent-runtime/scripts/smoke_claude.py` (US$0.50 budget)
-is the first check for anyone with a key. Other providers are planned.
+verified against the live API. `services/agent-runtime/scripts/smoke_provider.py` (US$0.50 budget)
+is the first check for anyone with a key. OpenAI, Groq, and Gemini are planned (ADR-0019); the
+model list shows whether each provider has been verified live.
 
 ## Prerequisites
 
@@ -135,7 +136,7 @@ export the key only in the worker's shell. Then, from `services/agent-runtime`:
 
 1. `python3 -m pip install -r requirements.txt`
 2. One short run first:
-   `set -a && source ../../.env.worker && set +a && FINMIND_RESEARCHER_TOKEN=... python3 scripts/smoke_claude.py`
+   `set -a && source ../../.env.worker && set +a && FINMIND_RESEARCHER_TOKEN=... python3 scripts/smoke_provider.py --provider anthropic`
    (S01, 3 virtual days, US$0.50 budget; it prints the cost and trace checks).
    A request is sent only if its worst case fits the remaining budget, from
    this repository's price table and Anthropic's token-count estimate plus a
