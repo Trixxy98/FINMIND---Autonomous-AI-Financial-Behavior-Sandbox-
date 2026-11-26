@@ -28,7 +28,7 @@ class SmokeProviderTests(unittest.TestCase):
 
     def test_the_budget_stays_at_fifty_cents_and_only_providers_with_adapters_are_listed(self):
         self.assertEqual(smoke.MAX_COST_MICRO_USD, 500_000)
-        self.assertEqual(sorted(smoke.ADAPTERS), ["anthropic", "groq", "openai"])
+        self.assertEqual(sorted(smoke.ADAPTERS), ["anthropic", "google", "groq", "openai"])
 
     def test_the_old_claude_script_still_runs_the_anthropic_smoke(self):
         text = (SCRIPT.parent / "smoke_claude.py").read_text(encoding="utf-8")

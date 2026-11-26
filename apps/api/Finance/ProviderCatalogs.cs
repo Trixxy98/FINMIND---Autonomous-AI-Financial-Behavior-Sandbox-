@@ -53,7 +53,8 @@ public sealed record ModelPrice(long Input, long Output, long CacheRead, long Ca
 // Adapter: recorded in each snapshot with the token bound and sampling (null keeps earlier snapshots unchanged).
 public sealed record ProviderInfo(string Id, string Label, string PricingVersion, IReadOnlyDictionary<string, ModelPrice> Prices,
     bool VerifiedLive, IReadOnlySet<string> Efforts,
-    IReadOnlyDictionary<string, (long Threshold, ModelPrice Price)> LongPrompts, string? Adapter = null, string? TokenBound = null);
+    IReadOnlyDictionary<string, (long Threshold, ModelPrice Price)> LongPrompts, string? Adapter = null, string? TokenBound = null,
+    IReadOnlyDictionary<string, IReadOnlyList<(DateTimeOffset From, ModelPrice Price)>>? PriceChanges = null);
 
 public static class ProviderCatalog
 {
@@ -71,6 +72,11 @@ public static class ProviderCatalog
         ["groq"] = new("groq", "Groq", GroqPricing.Version, GroqPricing.Prices,
             VerifiedLive: false, new HashSet<string> { "low", "medium", "high" }, new Dictionary<string, (long, ModelPrice)>(),
             Adapter: "groq-chat/v1", TokenBound: "utf8-bytes+1024/v1"),
+        // ADR-0019 step 4. Interactions API with store=false; low, medium, and high are accepted by every listed model.
+        // Prices change on announced dates (PriceChanges). Not verified against the live API.
+        ["google"] = new("google", "Google (Gemini)", GeminiPricing.Version, GeminiPricing.Prices,
+            VerifiedLive: false, new HashSet<string> { "low", "medium", "high" }, new Dictionary<string, (long, ModelPrice)>(),
+            Adapter: "gemini-interactions/v1", TokenBound: "utf8-bytes+1024/v1", PriceChanges: GeminiPricing.Changes),
     };
 
     // Refused by the API at startup whether or not the provider's adapter exists yet: credentials belong to the worker.
@@ -106,37 +112,43 @@ public static class PricingCatalog
     private static readonly ModelPrice HaikuLongPrompt = new(500_000, 2_500_000, 50_000, 625_000);
 
     // requests: how many requests the totals cover. The long-prompt tier is per request, not per turn.
+    // at: when the cost is incurred; a dated price change applies from its date (ADR-0019 step 4). Defaults to now.
     public static long CostMicroUsd(string provider, string modelId, long inputTokens, long outputTokens, long cacheReadTokens,
-        long cacheWriteTokens, int requests = 1)
+        long cacheWriteTokens, int requests = 1, DateTimeOffset? at = null)
     {
         if (!ProviderCatalog.IsPaid(provider)) return 0;
-        var price = PriceFor(provider, modelId, (inputTokens + cacheReadTokens + cacheWriteTokens) / Math.Max(requests, 1));
+        var price = PriceFor(provider, modelId, (inputTokens + cacheReadTokens + cacheWriteTokens) / Math.Max(requests, 1), at);
         return price.Cost(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
     }
 
     // ADR-0013 A1: every input token at the dearest input rate, and every allowed output token used.
-    public static long WorstCaseMicroUsd(string provider, string modelId, long inputTokens, long maxOutputTokens)
+    public static long WorstCaseMicroUsd(string provider, string modelId, long inputTokens, long maxOutputTokens, DateTimeOffset? at = null)
     {
-        var price = PriceFor(provider, modelId, inputTokens);
+        var price = PriceFor(provider, modelId, inputTokens, at);
         var dearest = price with { Input = Math.Max(price.Input, price.CacheWrite) };
         return dearest.Cost(inputTokens, maxOutputTokens, 0, 0);
     }
 
     // The most output tokens whose worst case still fits in the remaining budget. May be zero or negative.
-    public static long AffordableOutputTokens(string provider, string modelId, long inputTokens, long remainingMicroUsd)
+    public static long AffordableOutputTokens(string provider, string modelId, long inputTokens, long remainingMicroUsd,
+        DateTimeOffset? at = null)
     {
-        var price = PriceFor(provider, modelId, inputTokens);
+        var price = PriceFor(provider, modelId, inputTokens, at);
         return (checked(remainingMicroUsd * 1_000_000) - checked(inputTokens * Math.Max(price.Input, price.CacheWrite))) / price.Output;
     }
 
     public static string VersionFor(string? provider) =>
         provider is not null && ProviderCatalog.Paid.TryGetValue(provider, out var p) ? p.PricingVersion : "none";
 
-    private static ModelPrice PriceFor(string provider, string modelId, long promptTokens)
+    private static ModelPrice PriceFor(string provider, string modelId, long promptTokens, DateTimeOffset? at)
     {
         var price = ProviderCatalog.Paid.TryGetValue(provider, out var info) && info.Prices.TryGetValue(modelId, out var known)
             ? known
             : throw new InvalidOperationException($"No price for {provider} model {modelId}.");
+        var when = at ?? DateTimeOffset.UtcNow;
+        if (info!.PriceChanges?.TryGetValue(modelId, out var changes) == true)
+            foreach (var change in changes.Where(c => c.From <= when).OrderBy(c => c.From))
+                price = change.Price;
         if (info!.LongPrompts.TryGetValue(modelId, out var tier) && promptTokens > tier.Threshold)
             price = tier.Price;
         return price;
@@ -188,4 +200,39 @@ public static class GroqPricing
         ["openai/gpt-oss-120b"] = P(0.15m, 0.60m),
         ["openai/gpt-oss-20b"] = P(0.075m, 0.30m),
     };
+}
+
+// ADR-0019 step 4. From https://aistudio.google.com/docs/pricing (paid tier, standard, per 1M tokens), read 26 November
+// 2026; no publication date shown. Output includes thinking tokens. Cached input is the implicit-caching price; FINMIND
+// does not use explicit caching, so storage prices do not apply. No cache-write price, so CacheWrite is the input price.
+// Announced changes are dated; their time of day is not stated, so 00:00 UTC is used (the earliest possible start, so a
+// budget never underestimates). Verify before paid runs.
+public static class GeminiPricing
+{
+    public const string Version = "google-pricing/2026-11-26";
+
+    private static ModelPrice P(decimal input, decimal cached, decimal output) =>
+        new((long)(input * 1_000_000), (long)(output * 1_000_000), (long)(cached * 1_000_000), (long)(input * 1_000_000));
+
+    private static readonly DateTimeOffset December2026 = new(2026, 12, 1, 0, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset January2027 = new(2027, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+    public static readonly IReadOnlyDictionary<string, ModelPrice> Prices = new Dictionary<string, ModelPrice>
+    {
+        ["gemini-4-hydrogen"] = P(1.50m, 0.075m, 7.50m),
+        ["gemini-4-neon"] = P(3.00m, 0.15m, 15.00m),
+        ["gemini-4-carbon"] = P(2.00m, 0.10m, 10.00m),
+        ["gemini-4-argon"] = P(2.00m, 0.10m, 10.00m),
+        ["gemini-3.8-flash"] = P(0.75m, 0.075m, 3.75m),
+        ["gemini-3.6-flash"] = P(0.75m, 0.075m, 3.75m),
+    };
+
+    public static readonly IReadOnlyDictionary<string, IReadOnlyList<(DateTimeOffset From, ModelPrice Price)>> Changes =
+        new Dictionary<string, IReadOnlyList<(DateTimeOffset, ModelPrice)>>
+        {
+            ["gemini-4-carbon"] = [(December2026, P(4.00m, 0.20m, 20.00m))],
+            ["gemini-4-argon"] = [(December2026, P(4.00m, 0.20m, 20.00m))],
+            ["gemini-3.8-flash"] = [(January2027, P(1.50m, 0.15m, 7.50m))],
+            ["gemini-3.6-flash"] = [(January2027, P(1.50m, 0.15m, 7.50m))],
+        };
 }

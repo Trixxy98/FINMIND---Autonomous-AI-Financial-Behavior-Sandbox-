@@ -262,6 +262,9 @@ def create_agent(snapshot: Dict[str, Any], tools: Optional[List[Dict[str, Any]]]
         # Imported here so mock runs and CI never need the Anthropic SDK.
         from .claude import ClaudeAgent
         return ClaudeAgent(snapshot, tools or [])
+    if agent.get("provider") == "google":
+        from .gemini import GeminiAgent
+        return GeminiAgent(snapshot, tools or [])
     if agent.get("provider") == "groq":
         from .groq import GroqAgent
         return GroqAgent(snapshot, tools or [])

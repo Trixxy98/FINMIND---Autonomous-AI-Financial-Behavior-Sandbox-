@@ -34,6 +34,7 @@ ADAPTERS = {
     "anthropic": {"model": "claude-opus-5-5", "settings": {"effort": "medium"}},
     "openai": {"model": "gpt-6.2-sol", "settings": {"effort": "medium"}},
     "groq": {"model": "openai/gpt-oss-120b", "settings": {"effort": "medium"}},
+    "google": {"model": "gemini-4-hydrogen", "settings": {"effort": "medium"}},
 }
 
 

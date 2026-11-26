@@ -1007,7 +1007,7 @@ public sealed class InMemoryLedger : IFinanceLedger
             if (same is not null)
                 return new(null, AgentGatewayRules.Number(same, "maxOutputTokens"), AgentGatewayRules.Number(same, "reservedMicroUsd"), committed);
 
-            if (AgentGatewayRules.Grant(run.Snapshot, committed, reservation) is not { } grant)
+            if (AgentGatewayRules.Grant(run.Snapshot, committed, reservation, _time.GetUtcNow()) is not { } grant)
                 return new(Exhaust(runId, LedgerReasonCode.CostBudgetExceeded, AgentGatewayRules.CostExhaustedReason, trace), 0, 0, committed);
             run.ReservedMicroUsd += grant.CostMicroUsd;
             StoreEvent(runId, FinanceEvents.ModelCostReserved(reservation, grant.MaxOutputTokens, grant.CostMicroUsd));
@@ -1092,7 +1092,7 @@ public sealed class InMemoryLedger : IFinanceLedger
                 return new ModelInvocationResult(LedgerReasonCode.RunNotActive, false, run.TokensUsed, run.CostMicroUsd);
 
             var settled = AgentGatewayRules.Settled(reservations, invocation);
-            var cost = AgentGatewayRules.CostOf(run.Snapshot, invocation, settled.Length);
+            var cost = AgentGatewayRules.CostOf(run.Snapshot, invocation, settled.Length, _time.GetUtcNow());
             run.ReservedMicroUsd -= settled.Sum(p => AgentGatewayRules.Number(p, "reservedMicroUsd"));
             StoreEvent(runId, FinanceEvents.ModelInvocationCompleted(invocation, cost));
             run.TokensUsed = checked(run.TokensUsed + invocation.BudgetTokens);

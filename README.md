@@ -33,9 +33,9 @@ FINMIND runs locally: each researcher runs their own copy and brings their
 own provider key. It is not a hosted service. The Claude adapter is tested
 against the pinned Anthropic SDK and a fake transport; it has not yet been
 verified against the live API. `services/agent-runtime/scripts/smoke_provider.py` (US$0.50 budget)
-is the first check for anyone with a key. OpenAI (GPT) and Groq are available on the same terms: built
-from each provider's documentation and tested with a fake transport, not yet verified live. Gemini is
-planned (ADR-0019). The model list shows whether each provider has been verified live.
+is the first check for anyone with a key. OpenAI (GPT), Groq, and Google (Gemini) are available on the same
+terms: built from each provider's documentation and tested with a fake transport, not yet verified
+live (ADR-0019). The model list shows whether each provider has been verified live.
 
 ## Prerequisites
 
@@ -175,6 +175,20 @@ models with published prices: `openai/gpt-oss-120b` and `openai/gpt-oss-20b`
 `store`, and its data-retention terms were not stated on the pages read, so
 check Groq's data policy before sending anything you care about. Smoke run:
 `python3 scripts/smoke_provider.py --provider groq` (from `services/agent-runtime`).
+
+## Running with Google (Gemini)
+
+Gemini runs spend money on your Google AI Studio account (an API key from
+AI Studio, on a paid tier). Export `GEMINI_API_KEY` only in the worker's shell.
+Requests use the Interactions API with `store: false`. **On the free tier,
+Google's terms say it uses your prompts and responses to improve its products
+and that human reviewers may read them; on the paid tier it does not.**
+Models: `gemini-4-hydrogen`, `gemini-4-neon`, `gemini-4-carbon`,
+`gemini-4-argon`, `gemini-3.8-flash`, `gemini-3.6-flash`; efforts `low`,
+`medium`, `high`. Some prices change on announced dates (Carbon and Argon on
+1 December 2026, the two Flash models on 1 January 2027); FINMIND prices each
+turn at the rate in effect when it is recorded. Smoke run:
+`python3 scripts/smoke_provider.py --provider google` (from `services/agent-runtime`).
 
 ## Checks
 

@@ -832,6 +832,13 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         return reader.Read() && reader.GetString(0) == "stop";
     }
 
+    // ADR-0019: prices are dated, so costs use the database clock, as wall-time budgets do.
+    private static DateTimeOffset DatabaseNow(NpgsqlConnection connection, NpgsqlTransaction transaction)
+    {
+        using var command = new NpgsqlCommand("SELECT clock_timestamp()", connection, transaction);
+        return new DateTimeOffset(DateTime.SpecifyKind((DateTime)command.ExecuteScalar()!, DateTimeKind.Utc)); // timestamptz is read as UTC
+    }
+
     public OperatorStopResult StopAll(string? reason, string source)
     {
         var stored = OperatorSwitch.Reason(reason, "stop runs");
@@ -1010,7 +1017,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
         else if (Reservations(connection, transaction, runId, trace)
                      .FirstOrDefault(p => AgentGatewayRules.Number(p, "attempt") == reservation.Attempt) is { } same)
             result = new(null, AgentGatewayRules.Number(same, "maxOutputTokens"), AgentGatewayRules.Number(same, "reservedMicroUsd"), committed);
-        else if (AgentGatewayRules.Grant(snapshot, committed, reservation) is { } grant)
+        else if (AgentGatewayRules.Grant(snapshot, committed, reservation, DatabaseNow(connection, transaction)) is { } grant)
         {
             using var update = new NpgsqlCommand(
                 "UPDATE experiment_runs SET model_cost_reserved_micro_usd = model_cost_reserved_micro_usd + @cost WHERE id = @id",
@@ -1177,7 +1184,7 @@ public sealed class PostgresLedger(NpgsqlDataSource dataSource) : IFinanceLedger
 
         var settled = AgentGatewayRules.Settled(reservations, invocation);
         var released = settled.Sum(p => AgentGatewayRules.Number(p, "reservedMicroUsd"));
-        var turnCost = AgentGatewayRules.CostOf(snapshot, invocation, settled.Length);
+        var turnCost = AgentGatewayRules.CostOf(snapshot, invocation, settled.Length, DatabaseNow(connection, transaction));
         AppendEvent(connection, transaction, runId, FinanceEvents.ModelInvocationCompleted(invocation, turnCost));
         used = checked(used + invocation.BudgetTokens);
         cost = checked(cost + turnCost);

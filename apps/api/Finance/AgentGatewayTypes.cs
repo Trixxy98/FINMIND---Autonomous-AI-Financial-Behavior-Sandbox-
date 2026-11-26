@@ -60,24 +60,25 @@ public static class AgentGatewayRules
     public static string Provider(JsonObject snapshot) => snapshot["agent"]!["provider"]!.GetValue<string>();
     public static string ModelId(JsonObject snapshot) => snapshot["agent"]!["modelId"]!.GetValue<string>();
 
-    public static long CostOf(JsonObject snapshot, ModelInvocation invocation, int requests) =>
+    // at: when the turn is recorded; a dated price applies from its date (ADR-0019 step 4).
+    public static long CostOf(JsonObject snapshot, ModelInvocation invocation, int requests, DateTimeOffset at) =>
         PricingCatalog.CostMicroUsd(Provider(snapshot), ModelId(snapshot), invocation.InputTokens, invocation.OutputTokens,
-            invocation.CacheReadInputTokens, invocation.CacheCreationInputTokens, requests);
+            invocation.CacheReadInputTokens, invocation.CacheCreationInputTokens, requests, at);
 
     public const string SessionExpiredReason = "Worker session expired.";
     private const long MinimumOutputTokens = 1_024;
 
     // committed = recorded cost + outstanding reservations. Null when not even a minimal answer fits under the cap.
-    public static (long MaxOutputTokens, long CostMicroUsd)? Grant(JsonObject snapshot, long committed, ModelReservation request)
+    public static (long MaxOutputTokens, long CostMicroUsd)? Grant(JsonObject snapshot, long committed, ModelReservation request, DateTimeOffset at)
     {
         var provider = Provider(snapshot);
         if (!ProviderCatalog.IsPaid(provider)) return (request.MaxOutputTokens, 0);
         var model = ModelId(snapshot);
         var requested = Math.Min(request.MaxOutputTokens, Number(snapshot["agent"]!["settings"]!.AsObject(), "maxOutputTokensPerTurn"));
         var granted = Math.Min(requested,
-            PricingCatalog.AffordableOutputTokens(provider, model, request.InputTokens, MaxCostMicroUsd(snapshot) - committed));
+            PricingCatalog.AffordableOutputTokens(provider, model, request.InputTokens, MaxCostMicroUsd(snapshot) - committed, at));
         if (granted < Math.Min(MinimumOutputTokens, requested)) return null;
-        return (granted, PricingCatalog.WorstCaseMicroUsd(provider, model, request.InputTokens, granted));
+        return (granted, PricingCatalog.WorstCaseMicroUsd(provider, model, request.InputTokens, granted, at));
     }
 
     public static JsonObject[] Settled(IEnumerable<JsonObject> reservations, ModelInvocation invocation) =>

@@ -1,6 +1,6 @@
 # FINMIND ADR 0019: Multiple Model Providers
 
-- Status: Accepted 25 November 2026 (steps 1 to 3 implemented; amended on 26 November 2026, see step 2); decisions 1 to 4 as proposed
+- Status: Accepted 25 November 2026 (steps 1 to 4 implemented; amended on 26 November 2026, see steps 2 and 4); decisions 1 to 4 as proposed
 - Date: 25 November 2026
 - Scope: OpenAI (GPT), Groq, and Google (Gemini) as providers beside Anthropic
   (Claude), so users can compare them under the same scenario, prompt, tools,
@@ -220,6 +220,64 @@ provider.
   `console.groq.com` (a pricing citation) were added to the reviewed hosts.
 - Not verified against the live API. Groq's data-retention terms were not
   stated on the pages read.
+
+#### Step 4 as implemented (and two decisions)
+
+- **API.** Google's documentation (read 26 November 2026 at
+  aistudio.google.com, where ai.google.dev now redirects) calls
+  `generateContent` legacy and the Interactions API "the recommended
+  interface for all new projects". The researcher chose Interactions.
+- `finmind_runtime/gemini.py` (`gemini-interactions/v1`):
+  `POST https://generativelanguage.googleapis.com/v1beta/interactions`, the
+  key only in the `x-goog-api-key` header (never in the URL, unlike the
+  `?key=` examples), `store: false`, no `previous_interaction_id`, no
+  background. Each returned step is appended unchanged (Google: "You MUST
+  always resend all thought blocks exactly as they were received"), then one
+  `function_result` per call in the documented shape
+  (`{"type": "function_result", "name", "call_id", "result": [{"type": "text",
+  "text"}]}`). `generation_config` carries `max_output_tokens`,
+  `thinking_level`, and `tool_choice: auto`; no temperature (ignored or to be
+  rejected by newer Gemini models).
+- The full JSON of a `function_call` step is not shown verbatim in the docs;
+  the adapter uses the documented field names (`id`, `name`, `arguments`,
+  an object in every example) and parses `arguments` if it arrives as text.
+- Outcomes: `incomplete` is retried once with history unchanged, then ends
+  the run; `failed` or another unexpected status fails it. Blocked or
+  malformed generations (Google's error codes such as `safety`,
+  `prohibited_content`, `malformed_function_call`,
+  `missing_thought_signature`) fail the run as "HTTP n code" and keep their
+  reservation; other 4xx are marked as not run; 429 is retried under the same
+  reservation; 5xx keeps its reservation. Only Google's snake_case error code
+  is kept, never the message.
+- Usage: output is `total_output_tokens + total_thought_tokens` (Google:
+  "response pricing is the sum of output tokens and thinking tokens"). Whether
+  cached tokens are inside `total_input_tokens` is not stated, so they are not
+  subtracted, and tool-use prompt tokens count as input: the recorded cost can
+  be too high, never too low.
+- **Dated prices.** Gemini 4 Carbon and Argon double on 1 December 2026, and
+  3.8 Flash and 3.6 Flash on 1 January 2027. The researcher chose dated
+  prices: `ProviderInfo.PriceChanges` lists changes per model, and each turn
+  is priced at the rate in effect when the server records it (the database
+  clock for PostgreSQL, the ledger's clock in memory); reservations use the
+  same time. The time of day is not stated, so 00:00 UTC is used, the
+  earliest possible start. Any provider can now carry dated prices.
+- Catalog (`google-pricing/2026-11-26`, paid standard tier):
+  `gemini-4-hydrogen` ($1.50 / $7.50 / cached $0.075), `gemini-4-neon` ($3 /
+  $15 / $0.15), `gemini-4-carbon` and `gemini-4-argon` ($2 / $10 / $0.10,
+  then $4 / $20 / $0.20), `gemini-3.8-flash` and `gemini-3.6-flash` ($0.75 /
+  $3.75 / $0.075, then $1.50 / $7.50 / $0.15). Gemini 4 models carry no
+  "Stable" badge on the models page; the Flash models do. Flash-Lite models are
+  left out because their thinking levels are not listed. Levels `low`,
+  `medium`, `high`, which every listed model accepts.
+- Data use: on the free tier, Google's terms say prompts and responses are
+  used to improve its products and may be read by human reviewers; on the
+  paid tier they are not. The README says so.
+- Tests: `tests/test_gemini.py` (twelve unit tests on a fake transport and
+  an end-to-end run through the real API, cost 3,023 micro-dollars, checked by
+  hand) and `Finance.Tests/GeminiProviderTests.cs`, including both sides of
+  each price date. `generativelanguage.googleapis.com` and
+  `aistudio.google.com` (a pricing citation) were added to the reviewed hosts.
+- Not verified against the live API.
 
 ## Out of scope
 
