@@ -49,15 +49,23 @@ public sealed record ModelPrice(long Input, long Output, long CacheRead, long Ca
 
 // ADR-0019: one catalog of paid providers. Configuration, prices, credentials, and the app all read it.
 // VerifiedLive is true only after a smoke run against the provider's live API has been reported.
+// LongPrompts: per model, the prompt size above which a request is priced at the long-context rate.
+// Adapter: recorded in each snapshot with the token bound and sampling (null keeps earlier snapshots unchanged).
 public sealed record ProviderInfo(string Id, string Label, string PricingVersion, IReadOnlyDictionary<string, ModelPrice> Prices,
-    bool VerifiedLive, bool EffortSetting);
+    bool VerifiedLive, IReadOnlySet<string> Efforts,
+    IReadOnlyDictionary<string, (long Threshold, ModelPrice Price)> LongPrompts, string? Adapter = null, string? TokenBound = null);
 
 public static class ProviderCatalog
 {
     public static readonly IReadOnlyDictionary<string, ProviderInfo> Paid = new Dictionary<string, ProviderInfo>
     {
         ["anthropic"] = new("anthropic", "Anthropic (Claude)", PricingCatalog.Version, PricingCatalog.AnthropicPrices,
-            VerifiedLive: false, EffortSetting: true),
+            VerifiedLive: false, new HashSet<string> { "low", "medium", "high", "xhigh", "max" }, PricingCatalog.AnthropicLongPrompts),
+        // ADR-0019 step 2. Responses API; low, medium, and high are accepted by every listed model (some reject none
+        // or minimal). Not verified against the live API.
+        ["openai"] = new("openai", "OpenAI (GPT)", OpenAIPricing.Version, OpenAIPricing.Prices,
+            VerifiedLive: false, new HashSet<string> { "low", "medium", "high" }, OpenAIPricing.LongPrompts,
+            Adapter: "openai-responses/v1", TokenBound: "utf8-bytes+1024/v1"),
     };
 
     // Refused by the API at startup whether or not the provider's adapter exists yet: credentials belong to the worker.
@@ -77,6 +85,9 @@ public static class PricingCatalog
     // Cache writes use the documented ~1.25x input rate for 5-minute caching (an estimate, marked here).
     // Haiku 5.5 cache-read price was not listed; 0.1x input is used as a conservative estimate.
     public static IReadOnlyDictionary<string, ModelPrice> AnthropicPrices => Standard;
+
+    public static IReadOnlyDictionary<string, (long Threshold, ModelPrice Price)> AnthropicLongPrompts =>
+        new Dictionary<string, (long, ModelPrice)> { ["claude-haiku-5-5"] = (HaikuLongPromptThreshold, HaikuLongPrompt) };
 
     private static readonly IReadOnlyDictionary<string, ModelPrice> Standard = new Dictionary<string, ModelPrice>
     {
@@ -121,8 +132,37 @@ public static class PricingCatalog
         var price = ProviderCatalog.Paid.TryGetValue(provider, out var info) && info.Prices.TryGetValue(modelId, out var known)
             ? known
             : throw new InvalidOperationException($"No price for {provider} model {modelId}.");
-        if (provider == "anthropic" && modelId == "claude-haiku-5-5" && promptTokens > HaikuLongPromptThreshold)
-            price = HaikuLongPrompt;
+        if (info!.LongPrompts.TryGetValue(modelId, out var tier) && promptTokens > tier.Threshold)
+            price = tier.Price;
         return price;
     }
+}
+
+// ADR-0019 step 2. Copied from https://developers.openai.com/api/docs/pricing on 26 November 2026; the page shows no
+// update date. Standard tier, per million tokens. OpenAI charges no separate cache-write price, so CacheWrite is the
+// input price (the worst case already uses the dearer of the two). Verify before paid runs; a change is a new version.
+public static class OpenAIPricing
+{
+    public const string Version = "openai-pricing/2026-11-26";
+    private const long LongContextThreshold = 272_000; // "Long context: >272K input tokens"
+
+    private static ModelPrice P(decimal input, decimal cached, decimal output) =>
+        new((long)(input * 1_000_000), (long)(output * 1_000_000), (long)(cached * 1_000_000), (long)(input * 1_000_000));
+
+    public static readonly IReadOnlyDictionary<string, ModelPrice> Prices = new Dictionary<string, ModelPrice>
+    {
+        ["gpt-6.2-astra"] = P(8.00m, 0.40m, 40.00m),
+        ["gpt-6.2-sol"] = P(2.00m, 0.10m, 10.00m),
+        ["gpt-6-astra"] = P(10.00m, 1.00m, 50.00m),
+        ["gpt-6.1-sol"] = P(2.00m, 0.10m, 10.00m),
+    };
+
+    public static readonly IReadOnlyDictionary<string, (long Threshold, ModelPrice Price)> LongPrompts =
+        new Dictionary<string, (long, ModelPrice)>
+        {
+            ["gpt-6.2-astra"] = (LongContextThreshold, P(16.00m, 0.80m, 60.00m)),
+            ["gpt-6.2-sol"] = (LongContextThreshold, P(4.00m, 0.20m, 15.00m)),
+            ["gpt-6-astra"] = (LongContextThreshold, P(20.00m, 2.00m, 75.00m)),
+            ["gpt-6.1-sol"] = (LongContextThreshold, P(4.00m, 0.20m, 15.00m)),
+        };
 }

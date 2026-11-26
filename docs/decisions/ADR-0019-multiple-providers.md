@@ -1,6 +1,6 @@
 # FINMIND ADR 0019: Multiple Model Providers
 
-- Status: Accepted 25 November 2026 (step 1 implemented); decisions 1 to 4 as proposed
+- Status: Accepted 25 November 2026 (steps 1 and 2 implemented; amended on 26 November 2026, see step 2); decisions 1 to 4 as proposed
 - Date: 25 November 2026
 - Scope: OpenAI (GPT), Groq, and Google (Gemini) as providers beside Anthropic
   (Claude), so users can compare them under the same scenario, prompt, tools,
@@ -144,6 +144,46 @@ provider.
   verified.
 - No change to snapshots or the configuration version: adapter and bound
   versions are recorded when the first new adapter uses them (step 2).
+
+#### Step 2 as implemented (and an amendment)
+
+- **Amendment.** OpenAI's function-calling guide (read 26 November 2026)
+  says GPT-6 Astra and GPT-6.1 Sol require the Responses API for tool
+  calling, and the Chat Completions reference recommends Responses for new
+  projects. A Chat Completions adapter would have left out OpenAI's current
+  flagship models. With the researcher's agreement (option A), OpenAI uses
+  the Responses API, and Groq gets its own OpenAI-compatible Chat Completions
+  adapter in step 3. The order is unchanged.
+- `finmind_runtime/openai.py` (`openai-responses/v1`): standard-library
+  HTTPS to the fixed URL `https://api.openai.com/v1/responses`, the key only
+  in the Authorization header, `store: false`, no `previous_response_id`,
+  the whole history sent each turn, each response's output items (reasoning
+  with its encrypted content, messages, function calls) appended unchanged,
+  then one `function_call_output` per call. No temperature or top_p. Tools
+  are not strict. `max_output_tokens` is the granted limit.
+- Outcomes: `max_output_tokens` is retried once with history unchanged, then
+  ends the run; `content_filter` or a refusal part ends it as a refusal; a
+  429 is retried under the same reservation; other statuses fail the run as
+  "HTTP n", marked as not run for 4xx and possibly billed otherwise; a
+  timeout or dropped connection is possibly billed. Arguments that are not
+  valid JSON go to the gateway as text and are recorded as malformed.
+- Usage: OpenAI's `input_tokens` includes cached tokens, so FINMIND records
+  `input_tokens - cached_tokens` as input and `cached_tokens` as cache reads;
+  reasoning tokens are part of `output_tokens`.
+- Catalog: `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6-astra`, `gpt-6.1-sol`, with
+  standard and long-context (over 272K input tokens) prices from OpenAI's
+  pricing page as read on 26 November 2026 (`openai-pricing/2026-11-26`; the
+  page gives no date). Efforts `low`, `medium`, `high` only: the reasoning
+  guide says some of these models reject `none` or `minimal`. The Claude Haiku
+  long-prompt price now uses the same tier mechanism.
+- OpenAI snapshots record `adapter`, `tokenBound`, and
+  `sampling: provider-defaults`; Claude snapshots are unchanged.
+- Tests: `tests/test_openai.py`, fourteen unit tests against a fake
+  transport and an end-to-end run through the real API and database
+  (cost 3,430 micro-dollars for a scripted turn, checked by hand);
+  `Finance.Tests/OpenAIProviderTests.cs` for configuration, snapshot, and
+  prices. `api.openai.com` was added to the reviewed host list.
+- Not verified against the live API.
 
 ## Out of scope
 

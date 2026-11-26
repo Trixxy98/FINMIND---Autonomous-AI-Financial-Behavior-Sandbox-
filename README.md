@@ -33,8 +33,9 @@ FINMIND runs locally: each researcher runs their own copy and brings their
 own provider key. It is not a hosted service. The Claude adapter is tested
 against the pinned Anthropic SDK and a fake transport; it has not yet been
 verified against the live API. `services/agent-runtime/scripts/smoke_provider.py` (US$0.50 budget)
-is the first check for anyone with a key. OpenAI, Groq, and Gemini are planned (ADR-0019); the
-model list shows whether each provider has been verified live.
+is the first check for anyone with a key. OpenAI (GPT) is available on the same terms: built from
+OpenAI's documentation and tested with a fake transport, not yet verified live. Groq and Gemini are
+planned (ADR-0019). The model list shows whether each provider has been verified live.
 
 ## Prerequisites
 
@@ -146,6 +147,24 @@ export the key only in the worker's shell. Then, from `services/agent-runtime`:
    (`claude-opus-5-5`, `claude-sonnet-5-5`, or `claude-haiku-5-5`),
    `agent.settings.effort`, and `maxCostMicroUsd`. Check current prices
    before larger batches; the table is in `apps/api/Finance/ProviderCatalogs.cs`.
+
+## Running with OpenAI (GPT)
+
+OpenAI runs also spend real money, on your OpenAI API account (an API key from
+OpenAI's developer platform; a ChatGPT subscription does not include API
+access). Export `OPENAI_API_KEY` only in the worker's shell; the API refuses to
+start with it. Requests use the Responses API with `store: false`, so OpenAI
+keeps no copy of the conversation; FINMIND sends the whole history each turn.
+
+1. One short run first:
+   `set -a && source ../../.env.worker && set +a && FINMIND_RESEARCHER_TOKEN=... python3 scripts/smoke_provider.py --provider openai`
+   (from `services/agent-runtime`; S01, 3 virtual days, US$0.50 budget).
+2. For experiments, use `agent.provider` `openai`, a model ID (`gpt-6.2-astra`, `gpt-6.2-sol`,
+   `gpt-6-astra`, or `gpt-6.1-sol`), `agent.settings.effort` (`low`, `medium`, or `high`), and
+   `maxCostMicroUsd`. Prices were copied from OpenAI's pricing page on 26 November 2026
+   (`apps/api/Finance/ProviderCatalogs.cs`); check them first. Without a token-counting endpoint,
+   each request reserves its byte length plus 1,024 tokens, which can end a tight budget early;
+   the recorded cost uses OpenAI's reported usage.
 
 ## Checks
 

@@ -85,7 +85,7 @@ class FactoryTests(unittest.TestCase):
     def test_creates_configured_mocks_only(self):
         self.assertIsInstance(create_agent({"agent": {"provider": "mock", "modelId": "finmind-mock-v1"}, "seed": 1}), PrudentAgent)
         with self.assertRaises(ValueError):
-            create_agent({"agent": {"provider": "openai", "modelId": "x"}, "seed": 1})
+            create_agent({"agent": {"provider": "unlisted-provider", "modelId": "x"}, "seed": 1})
 
 
 if __name__ == "__main__":

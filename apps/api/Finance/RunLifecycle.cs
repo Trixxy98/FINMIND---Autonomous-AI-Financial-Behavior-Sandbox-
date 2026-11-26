@@ -115,7 +115,6 @@ public static class RunConfiguration
     // "sampling" is the v1 name; it is accepted only as an empty object.
     private static readonly HashSet<string> AgentFields = ["provider", "modelId", "settings", "sampling"];
     private static readonly HashSet<string> AnthropicSettings = ["effort", "maxOutputTokensPerTurn"];
-    private static readonly HashSet<string> Efforts = ["low", "medium", "high", "xhigh", "max"];
 
     // Returns the stored snapshot: researcher fields plus server-added reproducibility metadata.
     public static JsonObject Validate(JsonObject? input, string? codeRevision)
@@ -168,7 +167,8 @@ public static class RunConfiguration
                 given ??= new JsonObject();
                 errors.AddRange(given.Select(p => p.Key).Where(key => !AnthropicSettings.Contains(key)).Select(key => $"agent.settings.{key}"));
                 var effort = Text(given, "effort", 1, 10, errors, "agent.settings.");
-                if (!given.ContainsKey("effort") || (effort is not null && !Efforts.Contains(effort))) errors.Add("agent.settings.effort");
+                if (!given.ContainsKey("effort") || (effort is not null && !ProviderCatalog.Paid[provider!].Efforts.Contains(effort)))
+                    errors.Add("agent.settings.effort");
                 var maxOutput = given.ContainsKey("maxOutputTokensPerTurn")
                     ? Integer(given, "maxOutputTokensPerTurn", 1_024, 16_000, errors, "agent.settings.") : 16_000;
                 settings = new JsonObject { ["effort"] = effort, ["maxOutputTokensPerTurn"] = maxOutput };
@@ -206,7 +206,7 @@ public static class RunConfiguration
             ["maxCostMicroUsd"] = maxCost,
             ["memoryMode"] = memoryMode,
             ["describeUnavailableCapabilities"] = describeUnavailable,
-            ["agent"] = new JsonObject { ["provider"] = provider, ["modelId"] = modelId, ["settings"] = settings },
+            ["agent"] = AgentSnapshot(provider, modelId, settings),
             ["configSchemaVersion"] = RunCatalogs.ConfigSchemaVersion,
             ["scenarioVersion"] = scenario!.VersionLabel,
             ["scenarioHash"] = scenario.FileHash,
@@ -218,6 +218,19 @@ public static class RunConfiguration
             ["pricingVersion"] = PricingCatalog.VersionFor(provider),
             ["codeRevision"] = string.IsNullOrWhiteSpace(codeRevision) ? "unknown" : codeRevision.Trim()
         };
+    }
+
+    // ADR-0019: providers with an adapter version record it, the input-token bound, and that sampling is the provider's.
+    private static JsonObject AgentSnapshot(string? provider, string? modelId, JsonObject settings)
+    {
+        var agent = new JsonObject { ["provider"] = provider, ["modelId"] = modelId, ["settings"] = settings };
+        if (provider is not null && ProviderCatalog.Paid.TryGetValue(provider, out var info) && info.Adapter is not null)
+        {
+            agent["adapter"] = info.Adapter;
+            agent["tokenBound"] = info.TokenBound;
+            agent["sampling"] = "provider-defaults";
+        }
+        return agent;
     }
 
     // In-memory hash for tests. PostgreSQL computes the canonical hash over its own JSONB text (ADR-0008).

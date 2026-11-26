@@ -195,7 +195,7 @@ public sealed class RunLifecycleTests
         "limit_above_balance" => With(c => c["transactionLimitSen"] = 1_000_001),
         "out_of_range" => With(c => { c["durationDays"] = 0; c["seed"] = -1; }),
         "unknown_scenario" => With(c => c["scenarioId"] = "S99"),
-        "unknown_provider" => With(c => c["agent"]!["provider"] = "openai"),
+        "unknown_provider" => With(c => c["agent"]!["provider"] = "unlisted-provider"),
         "unknown_model" => With(c => c["agent"]!["modelId"] = "gpt-x"),
         "mock_sampling" => With(c => c["agent"]!["sampling"] = new JsonObject { ["temperature"] = 0 }),
         "agent_unknown_field" => With(c => c["agent"]!["apiKey"] = "sk-test"),

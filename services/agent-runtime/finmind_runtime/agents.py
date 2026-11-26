@@ -262,6 +262,9 @@ def create_agent(snapshot: Dict[str, Any], tools: Optional[List[Dict[str, Any]]]
         # Imported here so mock runs and CI never need the Anthropic SDK.
         from .claude import ClaudeAgent
         return ClaudeAgent(snapshot, tools or [])
+    if agent.get("provider") == "openai":
+        from .openai import OpenAIAgent
+        return OpenAIAgent(snapshot, tools or [])
     if agent.get("provider") != "mock" or agent.get("modelId") not in AGENTS:
         raise ValueError(f"No agent for provider {agent.get('provider')!r} model {agent.get('modelId')!r}")
     return AGENTS[agent["modelId"]](snapshot)
