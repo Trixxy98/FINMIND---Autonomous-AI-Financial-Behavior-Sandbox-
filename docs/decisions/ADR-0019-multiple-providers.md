@@ -1,6 +1,6 @@
 # FINMIND ADR 0019: Multiple Model Providers
 
-- Status: Accepted 25 November 2026 (steps 1 and 2 implemented; amended on 26 November 2026, see step 2); decisions 1 to 4 as proposed
+- Status: Accepted 25 November 2026 (steps 1 to 3 implemented; amended on 26 November 2026, see step 2); decisions 1 to 4 as proposed
 - Date: 25 November 2026
 - Scope: OpenAI (GPT), Groq, and Google (Gemini) as providers beside Anthropic
   (Claude), so users can compare them under the same scenario, prompt, tools,
@@ -184,6 +184,42 @@ provider.
   `Finance.Tests/OpenAIProviderTests.cs` for configuration, snapshot, and
   prices. `api.openai.com` was added to the reviewed host list.
 - Not verified against the live API.
+
+#### Step 3 as implemented
+
+- `finmind_runtime/groq.py` (`groq-chat/v1`): Groq's OpenAI-compatible Chat
+  Completions at the fixed URL `https://api.groq.com/openai/v1/chat/completions`,
+  standard-library HTTPS, the key only in the Authorization header.
+- Only fields Groq documents are sent: model, messages (the same prompt as a
+  system message), function tools, `tool_choice: auto`, `reasoning_effort`,
+  `max_completion_tokens`, and `parallel_tool_calls: false` (Groq's tool-use
+  table marks parallel calls as unsupported for gpt-oss). No `store`
+  (unsupported), no sampling, no `name` on tool messages (a 400 per Groq).
+- History: each assistant turn is replayed with role, content, and
+  tool_calls, then one role "tool" message per call. The model's `reasoning`
+  text is not sent back, because Groq does not document it as an input
+  field. This differs from the OpenAI and Claude adapters, which replay
+  reasoning; it is recorded here as a known difference between providers.
+  Groq's reasoning guide advises putting instructions in the user message for
+  reasoning models; FINMIND keeps the prompt in the system message so every
+  provider receives it the same way.
+- Outcomes: `length` is retried once, then ends the run; `content_filter`
+  ends it as a refusal; 429 and 498 (flex capacity) are retried under the
+  same reservation; 500, 502, and 503 are marked as not run (Groq: "You will
+  not be charged for requests that return server error codes"); a 422 keeps
+  its reservation, since its billing is not stated.
+- Catalog: `openai/gpt-oss-120b` ($0.15 input, $0.60 output per million) and
+  `openai/gpt-oss-20b` ($0.075, $0.30), from the production table on Groq's
+  models page as read on 26 November 2026 (`groq-pricing/2026-11-26`). Llama
+  models priced "Contact Sales" and preview models are left out. No cached
+  price is listed, so cached tokens (none are reported) would be priced as
+  input. Efforts `low`, `medium`, `high`.
+- Tests: `tests/test_groq.py` (ten unit tests on a fake transport and an
+  end-to-end run through the real API, cost 270 micro-dollars, checked by
+  hand) and `Finance.Tests/GroqProviderTests.cs`. `api.groq.com` and
+  `console.groq.com` (a pricing citation) were added to the reviewed hosts.
+- Not verified against the live API. Groq's data-retention terms were not
+  stated on the pages read.
 
 ## Out of scope
 

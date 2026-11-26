@@ -33,8 +33,8 @@ FINMIND runs locally: each researcher runs their own copy and brings their
 own provider key. It is not a hosted service. The Claude adapter is tested
 against the pinned Anthropic SDK and a fake transport; it has not yet been
 verified against the live API. `services/agent-runtime/scripts/smoke_provider.py` (US$0.50 budget)
-is the first check for anyone with a key. OpenAI (GPT) is available on the same terms: built from
-OpenAI's documentation and tested with a fake transport, not yet verified live. Groq and Gemini are
+is the first check for anyone with a key. OpenAI (GPT) and Groq are available on the same terms: built
+from each provider's documentation and tested with a fake transport, not yet verified live. Gemini is
 planned (ADR-0019). The model list shows whether each provider has been verified live.
 
 ## Prerequisites
@@ -165,6 +165,16 @@ keeps no copy of the conversation; FINMIND sends the whole history each turn.
    (`apps/api/Finance/ProviderCatalogs.cs`); check them first. Without a token-counting endpoint,
    each request reserves its byte length plus 1,024 tokens, which can end a tight budget early;
    the recorded cost uses OpenAI's reported usage.
+
+## Running with Groq
+
+Groq runs spend money on your Groq account (an API key from GroqCloud). Export
+`GROQ_API_KEY` only in the worker's shell. FINMIND lists only Groq production
+models with published prices: `openai/gpt-oss-120b` and `openai/gpt-oss-20b`
+(efforts `low`, `medium`, `high`). Groq's Chat Completions does not support
+`store`, and its data-retention terms were not stated on the pages read, so
+check Groq's data policy before sending anything you care about. Smoke run:
+`python3 scripts/smoke_provider.py --provider groq` (from `services/agent-runtime`).
 
 ## Checks
 

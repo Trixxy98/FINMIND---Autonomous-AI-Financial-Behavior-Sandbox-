@@ -24,7 +24,8 @@ NPM_LOCKED = {"@oxc-project/types", "@rolldown/pluginutils", "@types/react", "@t
 NPM_PLATFORM = re.compile(r"^(@rolldown/binding-|@typescript/typescript-|lightningcss-)[a-z0-9-]+$")
 IMAGES = {"postgres:18"}
 # Model APIs the worker calls, and the documentation pages the price tables cite in comments (never requested).
-HOSTS = {"127.0.0.1", "localhost", "api.anthropic.com", "platform.claude.com", "api.openai.com", "developers.openai.com"}
+HOSTS = {"127.0.0.1", "localhost", "api.anthropic.com", "platform.claude.com", "api.openai.com", "developers.openai.com",
+         "api.groq.com", "console.groq.com"}
 
 # Payment, banking, brokerage, wallet, and crypto SDKs and hosts. Matched as whole words, case-insensitively.
 FORBIDDEN = ["stripe", "paypal", "braintree", "adyen", "plaid", "razorpay", "billplz", "toyyibpay", "ipay88", "senangpay",

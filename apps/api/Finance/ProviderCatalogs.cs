@@ -66,6 +66,11 @@ public static class ProviderCatalog
         ["openai"] = new("openai", "OpenAI (GPT)", OpenAIPricing.Version, OpenAIPricing.Prices,
             VerifiedLive: false, new HashSet<string> { "low", "medium", "high" }, OpenAIPricing.LongPrompts,
             Adapter: "openai-responses/v1", TokenBound: "utf8-bytes+1024/v1"),
+        // ADR-0019 step 3. OpenAI-compatible Chat Completions; production models with published prices only.
+        // gpt-oss accepts low, medium, and high. Not verified against the live API.
+        ["groq"] = new("groq", "Groq", GroqPricing.Version, GroqPricing.Prices,
+            VerifiedLive: false, new HashSet<string> { "low", "medium", "high" }, new Dictionary<string, (long, ModelPrice)>(),
+            Adapter: "groq-chat/v1", TokenBound: "utf8-bytes+1024/v1"),
     };
 
     // Refused by the API at startup whether or not the provider's adapter exists yet: credentials belong to the worker.
@@ -165,4 +170,22 @@ public static class OpenAIPricing
             ["gpt-6-astra"] = (LongContextThreshold, P(20.00m, 2.00m, 75.00m)),
             ["gpt-6.1-sol"] = (LongContextThreshold, P(4.00m, 0.20m, 15.00m)),
         };
+}
+
+// ADR-0019 step 3. From the production models table at https://console.groq.com/docs/models, read 26 November 2026
+// ("PRICE PER 1M TOKENS"; no date shown). No cached-input price is listed, so cached tokens are priced as input and
+// there is no cache-write price. Models priced "Contact Sales" and preview models are left out: the budget needs a
+// published price, and Groq says preview models should not be used in production. Verify before paid runs.
+public static class GroqPricing
+{
+    public const string Version = "groq-pricing/2026-11-26";
+
+    private static ModelPrice P(decimal input, decimal output) =>
+        new((long)(input * 1_000_000), (long)(output * 1_000_000), (long)(input * 1_000_000), (long)(input * 1_000_000));
+
+    public static readonly IReadOnlyDictionary<string, ModelPrice> Prices = new Dictionary<string, ModelPrice>
+    {
+        ["openai/gpt-oss-120b"] = P(0.15m, 0.60m),
+        ["openai/gpt-oss-20b"] = P(0.075m, 0.30m),
+    };
 }

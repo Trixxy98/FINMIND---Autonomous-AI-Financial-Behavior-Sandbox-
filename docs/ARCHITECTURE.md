@@ -32,7 +32,7 @@ Threats and the tests behind each control are in
 | Part | Location | Holds |
 |---|---|---|
 | API | `apps/api` | Ledger, policy, tool gateway, research API |
-| Worker | `services/agent-runtime` | Agent loop, mock agents, Claude and OpenAI adapters |
+| Worker | `services/agent-runtime` | Agent loop, mock agents, Claude, OpenAI, and Groq adapters |
 | Web app | `apps/web` | Run list, run detail, comparison, review, replay, scene |
 | Database | `infra/db/migrations` | Schema, triggers, grants (applied as the owner role) |
 | Scenarios | `scenarios` | Versioned synthetic scenario files |
