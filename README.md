@@ -35,7 +35,8 @@ against the pinned Anthropic SDK and a fake transport; it has not yet been
 verified against the live API. `services/agent-runtime/scripts/smoke_provider.py` (US$0.50 budget)
 is the first check for anyone with a key. OpenAI (GPT), Groq, and Google (Gemini) are available on the same
 terms: built from each provider's documentation and tested with a fake transport, not yet verified
-live (ADR-0019). The model list shows whether each provider has been verified live.
+live (ADR-0019). The New run form shows, beside each model, whether its provider has been verified live and any
+provider notice.
 
 ## Prerequisites
 

@@ -510,7 +510,9 @@ research.MapGet("/models", () => Results.Ok(new
             providerLabel = ProviderCatalog.Paid.TryGetValue(p.Key, out var info) ? info.Label : "Mock (no provider)",
             pricingVersion = PricingCatalog.VersionFor(p.Key),
             // ADR-0019: false until a smoke run against the provider's live API has been reported.
-            verifiedLive = info?.VerifiedLive ?? true
+            verifiedLive = info?.VerifiedLive ?? true,
+            efforts = info is null ? [] : new[] { "low", "medium", "high", "xhigh", "max" }.Where(info.Efforts.Contains).ToArray(),
+            notice = info?.Notice
         }))
 }));
 

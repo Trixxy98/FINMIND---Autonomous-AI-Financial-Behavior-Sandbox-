@@ -54,7 +54,8 @@ public sealed record ModelPrice(long Input, long Output, long CacheRead, long Ca
 public sealed record ProviderInfo(string Id, string Label, string PricingVersion, IReadOnlyDictionary<string, ModelPrice> Prices,
     bool VerifiedLive, IReadOnlySet<string> Efforts,
     IReadOnlyDictionary<string, (long Threshold, ModelPrice Price)> LongPrompts, string? Adapter = null, string? TokenBound = null,
-    IReadOnlyDictionary<string, IReadOnlyList<(DateTimeOffset From, ModelPrice Price)>>? PriceChanges = null);
+    IReadOnlyDictionary<string, IReadOnlyList<(DateTimeOffset From, ModelPrice Price)>>? PriceChanges = null,
+    string? Notice = null); // shown to the researcher beside the model (ADR-0019 step 5)
 
 public static class ProviderCatalog
 {
@@ -71,12 +72,16 @@ public static class ProviderCatalog
         // gpt-oss accepts low, medium, and high. Not verified against the live API.
         ["groq"] = new("groq", "Groq", GroqPricing.Version, GroqPricing.Prices,
             VerifiedLive: false, new HashSet<string> { "low", "medium", "high" }, new Dictionary<string, (long, ModelPrice)>(),
-            Adapter: "groq-chat/v1", TokenBound: "utf8-bytes+1024/v1"),
+            Adapter: "groq-chat/v1", TokenBound: "utf8-bytes+1024/v1",
+            Notice: "Groq's Chat Completions does not support store, and the Groq pages read for FINMIND did not state how long " +
+                    "requests are kept. Check Groq's data policy."),
         // ADR-0019 step 4. Interactions API with store=false; low, medium, and high are accepted by every listed model.
         // Prices change on announced dates (PriceChanges). Not verified against the live API.
         ["google"] = new("google", "Google (Gemini)", GeminiPricing.Version, GeminiPricing.Prices,
             VerifiedLive: false, new HashSet<string> { "low", "medium", "high" }, new Dictionary<string, (long, ModelPrice)>(),
-            Adapter: "gemini-interactions/v1", TokenBound: "utf8-bytes+1024/v1", PriceChanges: GeminiPricing.Changes),
+            Adapter: "gemini-interactions/v1", TokenBound: "utf8-bytes+1024/v1", PriceChanges: GeminiPricing.Changes,
+            Notice: "On Google's free tier, Google's terms say prompts and responses are used to improve its products and " +
+                    "may be read by human reviewers. Use a paid tier. Some prices change on announced dates."),
     };
 
     // Refused by the API at startup whether or not the provider's adapter exists yet: credentials belong to the worker.

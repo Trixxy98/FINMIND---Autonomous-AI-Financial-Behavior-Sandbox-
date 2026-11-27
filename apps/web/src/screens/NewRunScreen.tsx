@@ -3,7 +3,7 @@ import { ApiError, type Api } from '../lib/api.js';
 import { batchRequest } from '../lib/analysis.js';
 import { formatSen } from '../lib/money.js';
 import {
-  EFFORTS, buildConfig, defaultForm, formatMicroUsd, isPaid, parseUsdToMicro, validateForm,
+  buildConfig, defaultForm, effortAfterModelChange, effortsFor, formatMicroUsd, isPaid, modelLabel, modelNotices, parseUsdToMicro, validateForm,
   type Model, type RunForm, type Scenario,
 } from '../lib/runForm.js';
 
@@ -55,11 +55,13 @@ export function NewRunScreen({ api, batch, copied, onCreated, onCancel }: Props)
 
   if (!form) return <section><h2>New run</h2><p>{message || 'Loading…'}</p></section>;
   const paid = isPaid(form.provider);
+  const model = models.find((m) => m.provider === form.provider && m.modelId === form.modelId);
+  const notices = modelNotices(model);
   const set = (patch: Partial<RunForm>) => { setForm({ ...form, ...patch }); setErrors([]); };
   const invalid = (field: string) => errors.includes(field);
 
   function review() {
-    const found = validateForm(form!);
+    const found = validateForm(form!, model);
     const batchError = batch ? batchRequest({}, count, seeds, label, false).error : undefined;
     setErrors(found);
     setMessage(found.length ? 'Correct the highlighted fields.' : batchError ?? '');
@@ -128,6 +130,7 @@ export function NewRunScreen({ api, batch, copied, onCreated, onCancel }: Props)
             ].map(([k, v]) => <tr key={k}><th style={{ textAlign: 'left', paddingRight: 12 }}>{k}</th><td>{v}</td></tr>)}
           </tbody>
         </table>
+        {notices.map((n) => <p key={n} role="note" style={{ background: '#fce8e6', padding: 8 }}>{n}</p>)}
         {paid && (
           <p style={{ background: '#fef7e0', padding: 8 }}>
             <label>
@@ -171,11 +174,15 @@ export function NewRunScreen({ api, batch, copied, onCreated, onCancel }: Props)
           {row('Model', 'agent.modelId',
             <select id="agent.modelId" value={`${form.provider}|${form.modelId}`} onChange={(e) => {
               const [provider, modelId] = e.target.value.split('|');
-              set({ provider, modelId, maxModelTokens: isPaid(provider) ? (form.maxModelTokens === '0' ? '300000' : form.maxModelTokens) : '0' });
+              const chosen = models.find((m) => m.provider === provider && m.modelId === modelId);
+              set({ provider, modelId, effort: effortAfterModelChange(form.effort, chosen),
+                maxModelTokens: isPaid(provider) ? (form.maxModelTokens === '0' ? '300000' : form.maxModelTokens) : '0' });
             }}>
-              {models.map((m) => <option key={`${m.provider}|${m.modelId}`} value={`${m.provider}|${m.modelId}`}>
-                {m.provider} / {m.modelId}{m.paid ? ' (paid)' : ''}</option>)}
+              {models.map((m) => <option key={`${m.provider}|${m.modelId}`} value={`${m.provider}|${m.modelId}`}>{modelLabel(m)}</option>)}
             </select>, paid ? 'Paid: a cost budget and a confirmation are required.' : 'Deterministic mock agent: no provider call.')}
+          {notices.length > 0 && (
+            <tr><td /><td>{notices.map((n) => <p key={n} role="note" style={{ background: '#fce8e6', padding: 8, margin: '4px 0', maxWidth: 560 }}>{n}</p>)}</td></tr>
+          )}
           {row('Objective', 'objective',
             <textarea id="objective" aria-invalid={invalid('objective')} rows={3} cols={60} value={form.objective}
               onChange={(e) => set({ objective: e.target.value })} />)}
@@ -188,7 +195,7 @@ export function NewRunScreen({ api, batch, copied, onCreated, onCancel }: Props)
           {row('Seed', 'seed', text('seed', 'seed', 120), 'Same seed and configuration give the same scenario.')}
           {paid && row('Effort', 'agent.settings.effort',
             <select id="agent.settings.effort" value={form.effort} onChange={(e) => set({ effort: e.target.value })}>
-              {EFFORTS.map((x) => <option key={x}>{x}</option>)}
+              {effortsFor(model).map((x) => <option key={x}>{x}</option>)}
             </select>)}
           {paid && row('Output tokens per turn', 'agent.settings.maxOutputTokensPerTurn',
             text('agent.settings.maxOutputTokensPerTurn', 'maxOutputTokens', 100), 'Optional, 1024 to 16000 (default 16000).')}

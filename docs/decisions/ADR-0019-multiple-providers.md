@@ -1,6 +1,6 @@
 # FINMIND ADR 0019: Multiple Model Providers
 
-- Status: Accepted 25 November 2026 (steps 1 to 4 implemented; amended on 26 November 2026, see steps 2 and 4); decisions 1 to 4 as proposed
+- Status: Accepted 25 November 2026; implemented (steps 1 to 5), amended 26 November 2026 (steps 2 and 4)
 - Date: 25 November 2026
 - Scope: OpenAI (GPT), Groq, and Google (Gemini) as providers beside Anthropic
   (Claude), so users can compare them under the same scenario, prompt, tools,
@@ -278,6 +278,25 @@ provider.
   each price date. `generativelanguage.googleapis.com` and
   `aistudio.google.com` (a pricing citation) were added to the reviewed hosts.
 - Not verified against the live API.
+
+#### Step 5 as implemented
+
+- `GET /api/v1/models` gives each model its provider label, price version,
+  `verifiedLive`, the efforts its provider accepts, and the provider's notice
+  (`ProviderInfo.Notice`): Groq's lack of `store` and unstated retention, and
+  Gemini's free-tier data use and dated prices.
+- The New run form labels each model "Provider / model (paid, not verified
+  live)", offers only that model's efforts (an effort the new model does not
+  accept falls back to `medium`), validates against them, and shows a notice
+  under the model and on the review screen: the adapter is not verified
+  against the live API, with the smoke command to run, plus the provider's
+  notice. Mock agents show none.
+- Checked in Chrome (test database, no paid run created): every provider's
+  models listed; Claude's five efforts, three for the others; switching from
+  Claude at `max` to OpenAI gives `medium`; Gemini shows both notices, Groq its
+  `store` notice, OpenAI and Claude the live-verification notice only.
+- Tests: four form tests (`tests/run-form.test.js`) and the models endpoint
+  test (`tests/test_read_api.py`).
 
 ## Out of scope
 

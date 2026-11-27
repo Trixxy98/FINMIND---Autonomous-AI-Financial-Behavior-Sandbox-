@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildConfig, defaultForm, formFromSnapshot, formatMicroUsd, parseMyrToSen, parseUsdToMicro, validateForm }
+import { buildConfig, defaultForm, effortAfterModelChange, effortsFor, formFromSnapshot, formatMicroUsd, modelLabel, modelNotices, parseMyrToSen, parseUsdToMicro, validateForm }
   from '../build-test/lib/runForm.js';
 
 describe('amount parsing is exact and integer-only', () => {
@@ -69,5 +69,44 @@ describe('configuration', () => {
     assert.deepEqual(config.agent.settings, { effort: 'high', maxOutputTokensPerTurn: 8000 });
     for (const key of ['configSchemaVersion', 'scenarioVersion', 'promptHash', 'codeRevision']) assert.ok(!(key in config));
     assert.deepEqual(warnings, ['The copied run used S02/v0; a new run uses S02/v1.']);
+  });
+});
+
+describe('providers in the form (ADR-0019 step 5)', () => {
+  const openai = { provider: 'openai', providerLabel: 'OpenAI (GPT)', modelId: 'gpt-6.2-sol', paid: true, verifiedLive: false,
+    efforts: ['low', 'medium', 'high'], notice: null };
+  const google = { provider: 'google', providerLabel: 'Google (Gemini)', modelId: 'gemini-4-hydrogen', paid: true, verifiedLive: false,
+    efforts: ['low', 'medium', 'high'], notice: 'On the free tier, Google uses prompts to improve its products.' };
+  const claude = { provider: 'anthropic', providerLabel: 'Anthropic (Claude)', modelId: 'claude-opus-5-5', paid: true, verifiedLive: true,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'], notice: null };
+
+  it('offers only the efforts the model accepts, and validates against them', () => {
+    assert.deepEqual(effortsFor(openai), ['low', 'medium', 'high']);
+    assert.deepEqual(effortsFor({ provider: 'anthropic', modelId: 'x', paid: true }), ['low', 'medium', 'high', 'xhigh', 'max']);
+    const form = { ...defaultForm({ id: 'S01', latest: true }, openai), maxCostUsd: '0.50' };
+    assert.deepEqual(validateForm({ ...form, effort: 'xhigh' }, openai), ['agent.settings.effort']);
+    assert.deepEqual(validateForm({ ...form, effort: 'high' }, openai), []);
+    assert.deepEqual(validateForm({ ...form, effort: 'xhigh' }, claude), []);
+  });
+
+  it('keeps a chosen effort when the new model accepts it, and falls back to medium otherwise', () => {
+    assert.equal(effortAfterModelChange('high', openai), 'high');
+    assert.equal(effortAfterModelChange('max', openai), 'medium');
+  });
+
+  it('warns when a provider is not verified live, and shows its own notice', () => {
+    const notices = modelNotices(google);
+    assert.equal(notices.length, 2);
+    assert.match(notices[0], /not yet verified against Google \(Gemini\)'s live API/);
+    assert.match(notices[0], /smoke_provider\.py --provider google/);
+    assert.equal(notices[1], google.notice);
+    assert.deepEqual(modelNotices(claude), []);
+    assert.deepEqual(modelNotices({ provider: 'mock', modelId: 'finmind-mock-v1', paid: false, verifiedLive: true }), []);
+  });
+
+  it('labels a model with its provider and whether it is verified', () => {
+    assert.equal(modelLabel(openai), 'OpenAI (GPT) / gpt-6.2-sol (paid, not verified live)');
+    assert.equal(modelLabel(claude), 'Anthropic (Claude) / claude-opus-5-5 (paid)');
+    assert.equal(modelLabel({ provider: 'mock', modelId: 'finmind-mock-v1', paid: false }), 'mock / finmind-mock-v1');
   });
 });

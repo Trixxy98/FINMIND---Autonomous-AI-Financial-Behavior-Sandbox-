@@ -1,7 +1,11 @@
 // ADR-0014: the New run form. Every amount becomes an integer through string arithmetic; the server stays
 // the authority on validation, and these checks only catch mistakes early.
 export interface Scenario { id: string; versionLabel: string; recommendedObjective?: string; title?: string; latest?: boolean }
-export interface Model { provider: string; modelId: string; paid?: boolean }
+export interface Model {
+  provider: string; modelId: string; paid?: boolean;
+  // ADR-0019: from GET /api/v1/models.
+  providerLabel?: string; verifiedLive?: boolean; efforts?: string[]; notice?: string | null;
+}
 
 export interface RunForm {
   objective: string;
@@ -59,6 +63,29 @@ function integer(text: string, min: number, max: number): number | null {
 
 export const isPaid = (provider: string) => provider !== 'mock';
 
+// ADR-0019: each provider accepts its own efforts; the server's catalog is the source.
+export const effortsFor = (model?: Model) => (model?.efforts && model.efforts.length ? model.efforts : EFFORTS);
+
+export const effortAfterModelChange = (effort: string, model?: Model) =>
+  effortsFor(model).includes(effort) ? effort : 'medium';
+
+export function modelLabel(model: Model): string {
+  const tags = model.paid ? ['paid', ...(model.verifiedLive === false ? ['not verified live'] : [])] : [];
+  return `${model.providerLabel ?? model.provider} / ${model.modelId}${tags.length ? ` (${tags.join(', ')})` : ''}`;
+}
+
+export function modelNotices(model?: Model): string[] {
+  if (!model?.paid) return [];
+  const notices: string[] = [];
+  if (model.verifiedLive === false) {
+    notices.push(`This adapter is not yet verified against ${model.providerLabel ?? model.provider}'s live API: it was built from the ` +
+      `provider's documentation and tested with a fake transport. Run services/agent-runtime/scripts/smoke_provider.py ` +
+      `--provider ${model.provider} first (US$0.50 budget).`);
+  }
+  if (model.notice) notices.push(model.notice);
+  return notices;
+}
+
 export function defaultForm(scenario: Scenario, model: Model): RunForm {
   return {
     objective: scenario.recommendedObjective ?? 'Manage the provided virtual funds responsibly.',
@@ -80,7 +107,7 @@ export function defaultForm(scenario: Scenario, model: Model): RunForm {
 }
 
 // Field names match the server's INVALID_RUN_CONFIG fields, so both kinds of error show in one place.
-export function validateForm(form: RunForm): string[] {
+export function validateForm(form: RunForm, model?: Model): string[] {
   const errors: string[] = [];
   const paid = isPaid(form.provider);
   if (!form.objective.trim() || form.objective.length > 2000) errors.push('objective');
@@ -98,7 +125,7 @@ export function validateForm(form: RunForm): string[] {
   if (integer(form.maxWallTimeSeconds, 1, 86_400) === null) errors.push('maxWallTimeSeconds');
   if (paid) {
     if (parseUsdToMicro(form.maxCostUsd) === null) errors.push('maxCostMicroUsd');
-    if (!EFFORTS.includes(form.effort)) errors.push('agent.settings.effort');
+    if (!effortsFor(model).includes(form.effort)) errors.push('agent.settings.effort');
     if (form.maxOutputTokens.trim() && integer(form.maxOutputTokens, 1024, 16_000) === null) {
       errors.push('agent.settings.maxOutputTokensPerTurn');
     }

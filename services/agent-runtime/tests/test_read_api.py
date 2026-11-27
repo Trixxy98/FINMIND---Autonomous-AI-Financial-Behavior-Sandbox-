@@ -196,3 +196,11 @@ class ModelCatalogApiTests(unittest.TestCase):
             self.assertTrue(m["pricingVersion"].startswith(m["provider"] + "-pricing/"), m)
             self.assertIs(m["verifiedLive"], False, m)
             self.assertTrue(m["providerLabel"])
+            self.assertTrue(set(m["efforts"]) >= {"low", "medium", "high"}, m)
+        by_provider = {m["provider"]: m for m in paid}
+        self.assertEqual(sorted(by_provider), ["anthropic", "google", "groq", "openai"])
+        self.assertNotIn("xhigh", by_provider["openai"]["efforts"])  # ADR-0019: only efforts every listed model accepts
+        self.assertIn("free tier", by_provider["google"]["notice"])
+        self.assertIn("store", by_provider["groq"]["notice"])
+        for m in mocks:
+            self.assertEqual((m["efforts"], m["notice"]), ([], None))
